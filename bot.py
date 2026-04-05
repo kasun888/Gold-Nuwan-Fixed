@@ -1,4 +1,4 @@
-"""Main orchestrator for the CPR Gold Bot — v5.1
+"""Main orchestrator for the CPR Gold Bot — v5.2 (V2)
 
 Runs the N-minute trading cycle for XAU/USD (default 5 min), applies
 session and risk controls, places orders through OANDA, manages break-even,
@@ -15,12 +15,16 @@ Active trading windows (SGT) — v4.2:
   Dead Zone: 01:00–15:59  (no new entries — existing trades managed only)
   Asian:     08:00–15:59 SGT — enabled v4.4 for 2-week evaluation
 
-v4.7 (current):
-  - ATR-based SL replaces fixed 0.25% percentage SL
-  - TP always derived from SL via rr_ratio (no more fallback_tp_multiplier hack)
-  - S2/R2 Extended setups hard-blocked when exhaustion stretch > threshold
-  - Breakeven re-enabled at $15 trigger (was disabled in v4.2)
-  - Same-setup cooldown microsecond precision bug fixed
+v5.2 / V2 changes:
+  - WIN CANDLE LOCK: After a TP close, new entries are blocked until the
+    winning M15 candle has fully closed and a NEW candle has opened.
+    This is state-based (candle boundary), NOT time-based (no cooldown timer).
+    Prevents re-entering on exhausted post-TP price moves — the primary cause
+    of the loss cluster observed after winning trades in the transaction history.
+  - set_last_win_candle() called inside backfill_pnl() on first TP detection
+  - _guard_phase() checks win candle lock BEFORE signal evaluation
+  - Lock is stored in runtime_state.json and survives process restarts
+  - New settings key: post_win_candle_lock (bool, default True) to toggle
 """
 
 import json
@@ -42,6 +46,8 @@ from startup_checks import run_startup_checks
 from state_utils import (
     RUNTIME_STATE_FILE, SCORE_CACHE_FILE, OPS_STATE_FILE, TRADE_HISTORY_FILE,
     update_runtime_state, load_json, save_json, parse_sgt_timestamp,
+    # v2.0 — Win Candle Lock
+    get_m15_candle_floor, set_last_win_candle, get_last_win_candle, clear_last_win_candle,
 )
 from telegram_alert import TelegramAlert
 from telegram_templates import (
@@ -116,7 +122,6 @@ def _build_signal_checks(score: int, direction: str, rr_ratio: float | None = No
         ("Margin OK", margin_ok, "n/a" if margin_ok is None else ("pass" if margin_ok else "insufficient")),
     ]
     return mandatory_checks, quality_checks, execution_checks
-
 
 
 
@@ -195,6 +200,9 @@ def validate_settings(settings: dict) -> dict:
     settings.setdefault("session_end_hour_sgt",        1)
     # v4.2 — same-setup re-entry cooldown (microsecond bug fixed in v4.0)
     settings.setdefault("same_setup_cooldown_min",     15)
+    # v2.0 — Win candle lock: block re-entry on the same M15 candle after a TP win
+    # Set to false to disable (not recommended — reverts to v1 behaviour)
+    settings.setdefault("post_win_candle_lock",        True)
     # NOTE: fallback_tp_multiplier removed in v4.0 — ATR-based SL makes it redundant
 
     cooldown_min = int(settings.get("loss_streak_cooldown_min", 30))
@@ -853,8 +861,21 @@ def _count_consecutive_sl(history: list, direction: str) -> int:
 # ── PnL backfill ───────────────────────────────────────────────────────────────
 
 def backfill_pnl(history: list, trader, alert, settings: dict) -> list:
+    """Check all open FILLED trades against the broker and record realized PnL.
+
+    v2.0 — WIN CANDLE LOCK integration:
+    When a trade is discovered to have closed with positive PnL (TP hit), we
+    call set_last_win_candle() to record the current M15 candle floor in
+    runtime_state.json.  _guard_phase() will then block any new entry until
+    this candle has fully closed and a new one has opened.
+
+    This is the ONLY place the lock is SET.  It clears automatically in
+    _guard_phase() when a newer candle is detected.
+    """
     changed = False
     demo = settings.get("demo_mode", True)
+    now_sgt = datetime.now(SGT)
+
     for trade in history:
         if trade.get("status") == "FILLED" and trade.get("realized_pnl_usd") is None:
             trade_id = trade.get("trade_id")
@@ -862,9 +883,32 @@ def backfill_pnl(history: list, trader, alert, settings: dict) -> list:
                 pnl = trader.get_trade_pnl(str(trade_id))
                 if pnl is not None:
                     trade["realized_pnl_usd"] = pnl
-                    trade["closed_at_sgt"] = datetime.now(SGT).strftime("%Y-%m-%d %H:%M:%S")
+                    trade["closed_at_sgt"] = now_sgt.strftime("%Y-%m-%d %H:%M:%S")
                     changed = True
                     log.info("Back-filled P&L trade %s: $%.2f", trade_id, pnl)
+
+                    # ── v2.0 WIN CANDLE LOCK ───────────────────────────────
+                    # A positive PnL means this trade just closed as a TP win.
+                    # Record the winning candle so _guard_phase() can block
+                    # re-entry until the NEXT M15 candle opens.
+                    # We only set the lock if it's not already set for this
+                    # same candle (idempotent — safe if backfill runs twice).
+                    if pnl > 0 and settings.get("post_win_candle_lock", True):
+                        current_candle = get_m15_candle_floor(now_sgt)
+                        existing_lock  = get_last_win_candle()
+                        if existing_lock != current_candle:
+                            set_last_win_candle(now_sgt)
+                            log.info(
+                                "WIN detected (trade %s PL=+$%.2f) — win candle lock SET: %s",
+                                trade_id, pnl, current_candle,
+                            )
+                        else:
+                            log.debug(
+                                "WIN detected (trade %s) but candle lock already set for %s — skipping duplicate set",
+                                trade_id, existing_lock,
+                            )
+                    # ──────────────────────────────────────────────────────
+
                     if not trade.get("closed_alert_sent"):
                         try:
                             _cp  = trade.get("tp_price") if pnl > 0 else trade.get("sl_price")
@@ -1071,7 +1115,30 @@ def _pyramid_phase(db, run_id, settings, alert, trader, history, now_sgt, today,
 
 
 def _guard_phase(db, run_id, settings, alert, trader, history, now_sgt, today, demo) -> dict | None:
-    """All pre-trade guards.  Returns a populated context dict or None (cycle aborted)."""
+    """All pre-trade guards.  Returns a populated context dict or None (cycle aborted).
+
+    Guard order (v2.0):
+      1. Enabled check
+      2. Prune / history save
+      3. Market day guards (Saturday, Sunday, Monday pre-open)
+      4. Calendar refresh
+      5. PnL backfill  ← WIN CANDLE LOCK is SET here when a TP is detected
+      6. Breakeven check
+      7. Early daily loss-cap check
+      8. Loss cooldown notification
+      9. Session check
+      10. Friday cutoff
+      11. News filter
+      12. OANDA login
+      13. Runtime reconcile
+      14. Daily caps (losses, session losses, trade count)
+      15. Loss-streak cooldown gate
+      16. Window cap
+      17. Concurrent trade gate
+      18. ── WIN CANDLE LOCK CHECK ──  ← NEW in v2.0
+          Block new entry if we're still on the same M15 candle a TP fired on.
+          Clears automatically when the next candle opens.
+    """
 
     # ops_state cache: deduplicates operational Telegram alerts (session changes,
     # news blocks, cooldowns, caps). Stored in ops_state.json — separate from
@@ -1131,7 +1198,12 @@ def _guard_phase(db, run_id, settings, alert, trader, history, now_sgt, today, d
         except Exception as e:
             log.warning("Calendar refresh failed (using cached): %s", e, extra={"run_id": run_id})
 
+    # backfill_pnl runs BEFORE the win candle lock check intentionally.
+    # This ensures: if a TP was just hit, the lock is SET in this same cycle,
+    # and then the lock check below immediately blocks the new entry.
+    # Without this ordering, the lock would only take effect one cycle late.
     history[:] = backfill_pnl(history, trader, alert, settings)
+
     # v4.1 — gated by breakeven_enabled (default True).
     # Set breakeven_enabled: false to disable tiered exit entirely.
     if settings.get("breakeven_enabled", True):
@@ -1361,6 +1433,68 @@ def _guard_phase(db, run_id, settings, alert, trader, history, now_sgt, today, d
         update_runtime_state(last_cycle_finished=now_sgt.strftime("%Y-%m-%d %H:%M:%S"), status="SKIPPED_OPEN_TRADE_CAP")
         db.finish_cycle(run_id, status="SKIPPED", summary={"stage": "open_trade_guard"})
         return None
+
+    # ── v2.0 WIN CANDLE LOCK ───────────────────────────────────────────────────
+    # After a TP win, block new entries until the winning M15 candle has fully
+    # closed and a brand-new candle has opened.
+    #
+    # WHY HERE (after concurrent trade guard):
+    #   We only apply this guard when we'd otherwise proceed to place a trade.
+    #   If there's already an open trade, the concurrent guard above already
+    #   blocked us — no need to also check the win lock.
+    #
+    # WHY NOT A COOLDOWN TIMER:
+    #   The candle boundary is the natural reset point for the signal engine
+    #   (require_candle_close=True). Using the same boundary here keeps the
+    #   entry logic consistent — a new trade is only ever considered on a NEW
+    #   candle, whether or not a win just happened.
+    if settings.get("post_win_candle_lock", True) and open_count == 0:
+        _last_win_candle = get_last_win_candle()
+        if _last_win_candle:
+            _current_candle = get_m15_candle_floor(now_sgt)
+            if _current_candle == _last_win_candle:
+                # Still on the same M15 candle the TP fired on — block entry.
+                # Calculate when the next candle opens for the Telegram message.
+                _win_floor_dt = SGT.localize(datetime.strptime(_last_win_candle, "%Y-%m-%d %H:%M"))
+                _next_candle  = _win_floor_dt + timedelta(minutes=15)
+                _next_str     = _next_candle.strftime("%H:%M")
+                msg = (
+                    f"🏆 Post-win candle lock active — skipping entry on same M15 candle as TP.\n"
+                    f"Winning candle: {_last_win_candle} SGT | Next candle opens: {_next_str} SGT.\n"
+                    f"Re-evaluating signal on the next clean candle."
+                )
+                send_once_per_state(
+                    alert, ops, "post_win_lock_state",
+                    f"post_win:{_last_win_candle}",
+                    msg,
+                )
+                log_event(
+                    "POST_WIN_CANDLE_LOCK",
+                    f"Entry blocked — same candle as TP win ({_last_win_candle}). Next candle: {_next_str} SGT.",
+                    run_id=run_id,
+                )
+                update_runtime_state(
+                    last_cycle_finished=now_sgt.strftime("%Y-%m-%d %H:%M:%S"),
+                    status="SKIPPED_POST_WIN_CANDLE_LOCK",
+                )
+                db.finish_cycle(
+                    run_id, status="SKIPPED",
+                    summary={
+                        "stage":        "post_win_candle_lock",
+                        "win_candle":   _last_win_candle,
+                        "next_candle":  _next_str,
+                    },
+                )
+                return None
+            else:
+                # A new candle has opened — lock is no longer needed, clear it.
+                clear_last_win_candle()
+                log.info(
+                    "Post-win candle lock CLEARED | was=%s | now=%s | entries re-enabled",
+                    _last_win_candle, _current_candle,
+                    extra={"run_id": run_id},
+                )
+    # ── END WIN CANDLE LOCK ───────────────────────────────────────────────────
 
     return {
         "balance": balance, "account_summary": account_summary,
