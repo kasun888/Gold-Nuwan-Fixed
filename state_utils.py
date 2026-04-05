@@ -80,3 +80,64 @@ def parse_sgt_timestamp(value: str | None) -> datetime | None:
         except Exception:
             pass
     return None
+
+
+# ── v2.0 — Win Candle Lock helpers ────────────────────────────────────────────
+# After a TP (winning) close, the bot records the M15 candle boundary at which
+# the win occurred.  _guard_phase() checks this before allowing a new entry:
+# if the current candle is still the same candle the win closed on, entry is
+# blocked.  No timer involved — the lock clears automatically when the next
+# M15 candle opens.  This prevents re-entering on exhausted price moves in
+# the seconds/minutes immediately after a TP hit.
+#
+# Key design decisions:
+#   - Candle-boundary based, NOT time-based (no cooldown minutes in settings)
+#   - Consistent with require_candle_close=True — both wait for candle boundaries
+#   - Lock is stored in runtime_state.json so it survives process restarts
+#   - Lock auto-expires: once the current candle != win candle, it clears itself
+#   - Only TP wins set the lock; SL losses do NOT (losses use loss-streak logic)
+
+def get_m15_candle_floor(dt: datetime) -> str:
+    """Return the M15 candle floor timestamp string for a given SGT datetime.
+
+    Examples:
+        10:47 SGT  →  '2026-03-23 10:45'
+        10:53 SGT  →  '2026-03-23 10:45'
+        11:01 SGT  →  '2026-03-23 11:00'
+        11:15 SGT  →  '2026-03-23 11:15'
+    """
+    floored_min = (dt.minute // 15) * 15
+    candle_floor = dt.replace(minute=floored_min, second=0, microsecond=0)
+    return candle_floor.strftime("%Y-%m-%d %H:%M")
+
+
+def set_last_win_candle(dt: datetime) -> None:
+    """Record the M15 candle floor at which a TP win was detected.
+
+    Called from backfill_pnl() whenever pnl > 0 is first detected on a
+    previously-open trade (i.e. the trade just closed as a winner).
+    The candle floor — not the exact close time — is stored so that
+    comparison in _guard_phase() is purely candle-index based.
+    """
+    candle_ts = get_m15_candle_floor(dt)
+    update_runtime_state(last_win_candle_ts=candle_ts)
+    logger.info("Win candle lock SET — candle=%s (no new entry until next candle)", candle_ts)
+
+
+def get_last_win_candle() -> str | None:
+    """Return the stored win-candle floor string, or None if not set / cleared."""
+    state = load_json(RUNTIME_STATE_FILE, {})
+    val = state.get("last_win_candle_ts")
+    # Treat explicit None or empty string as "not set"
+    return val if val else None
+
+
+def clear_last_win_candle() -> None:
+    """Explicitly clear the win candle lock.
+
+    Called by _guard_phase() when it detects the current candle has advanced
+    past the win candle — the lock is no longer needed and is removed from
+    runtime_state.json so subsequent log output stays clean.
+    """
+    update_runtime_state(last_win_candle_ts=None)
+    logger.info("Win candle lock CLEARED — new M15 candle confirmed, entries re-enabled")
