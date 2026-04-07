@@ -43,6 +43,7 @@
   "friday_cutoff_minute_sgt": 0,
   "account_balance_override": 0,
   "cycle_minutes": 5,
+  "cycle_seconds": 30,
   "db_retention_days": 90,
   "db_cleanup_hour_sgt": 0,
   "db_cleanup_minute_sgt": 15,
