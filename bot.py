@@ -48,6 +48,7 @@ from state_utils import (
     update_runtime_state, load_json, save_json, parse_sgt_timestamp,
     # v2.0 — Win Candle Lock
     get_m15_candle_floor, set_last_win_candle, get_last_win_candle, clear_last_win_candle,
+    set_win_session, get_win_session, clear_win_session,
 )
 from telegram_alert import TelegramAlert
 from telegram_templates import (
@@ -203,6 +204,7 @@ def validate_settings(settings: dict) -> dict:
     # v2.0 — Win candle lock: block re-entry on the same M15 candle after a TP win
     # Set to false to disable (not recommended — reverts to v1 behaviour)
     settings.setdefault("post_win_candle_lock",        True)
+    settings.setdefault("post_win_session_lock",       True)   # v2.1 — block rest of session after a win
     # NOTE: fallback_tp_multiplier removed in v4.0 — ATR-based SL makes it redundant
 
     cooldown_min = int(settings.get("loss_streak_cooldown_min", 30))
@@ -907,6 +909,19 @@ def backfill_pnl(history: list, trader, alert, settings: dict) -> list:
                                 "WIN detected (trade %s) but candle lock already set for %s — skipping duplicate set",
                                 trade_id, existing_lock,
                             )
+
+                    # ── v2.1 POST-WIN SESSION LOCK ─────────────────────────
+                    # Also lock out trading for the rest of this macro session.
+                    if pnl > 0 and settings.get("post_win_session_lock", True):
+                        _win_macro = trade.get("macro_session") or trade.get("session")
+                        _win_day   = trade.get("trading_day", now_sgt.strftime("%Y-%m-%d"))
+                        _existing_win_sess, _existing_win_day = get_win_session()
+                        if _win_macro and (_existing_win_sess != _win_macro or _existing_win_day != _win_day):
+                            set_win_session(_win_macro, _win_day)
+                            log.info(
+                                "WIN detected (trade %s PL=+$%.2f) — SESSION lock SET: session=%s day=%s",
+                                trade_id, pnl, _win_macro, _win_day,
+                            )
                     # ──────────────────────────────────────────────────────
 
                     if not trade.get("closed_alert_sent"):
@@ -1433,6 +1448,59 @@ def _guard_phase(db, run_id, settings, alert, trader, history, now_sgt, today, d
         update_runtime_state(last_cycle_finished=now_sgt.strftime("%Y-%m-%d %H:%M:%S"), status="SKIPPED_OPEN_TRADE_CAP")
         db.finish_cycle(run_id, status="SKIPPED", summary={"stage": "open_trade_guard"})
         return None
+
+    # ── v2.1 POST-WIN SESSION LOCK ─────────────────────────────────────────────
+    # After a TP win, block ALL new entries for the remainder of that macro
+    # session (Asian / London / US).  Resumes automatically when the bot
+    # detects it is now in a different macro session.
+    #
+    # This addresses the pattern where a winning trade is followed by losing
+    # trades in the same session — "banking the win" by sitting out the rest
+    # of the session.
+    if settings.get("post_win_session_lock", True) and open_count == 0:
+        _locked_sess, _locked_day = get_win_session()
+        if _locked_sess and _locked_day:
+            _cur_macro  = macro          # already resolved above by get_session()
+            _cur_day    = today
+            if _cur_macro == _locked_sess and _cur_day == _locked_day:
+                # Still in the same session as the win — block entry.
+                _lock_msg = (
+                    f"🏆 Post-win SESSION lock active — trading paused for rest of {_locked_sess} session.\n"
+                    f"A winning trade was closed this {_locked_sess} session ({_locked_day}).\n"
+                    f"New entries will resume at the start of the next session."
+                )
+                send_once_per_state(
+                    alert, ops, "post_win_session_lock_state",
+                    f"win_sess:{_locked_sess}:{_locked_day}",
+                    _lock_msg,
+                )
+                log_event(
+                    "POST_WIN_SESSION_LOCK",
+                    f"Entry blocked — win already taken in {_locked_sess} session ({_locked_day}).",
+                    run_id=run_id,
+                )
+                update_runtime_state(
+                    last_cycle_finished=now_sgt.strftime("%Y-%m-%d %H:%M:%S"),
+                    status="SKIPPED_POST_WIN_SESSION_LOCK",
+                )
+                db.finish_cycle(
+                    run_id, status="SKIPPED",
+                    summary={
+                        "stage":         "post_win_session_lock",
+                        "win_session":   _locked_sess,
+                        "win_day":       _locked_day,
+                    },
+                )
+                return None
+            else:
+                # New session (or new day) — lock is no longer needed, clear it.
+                clear_win_session()
+                log.info(
+                    "Post-win SESSION lock CLEARED | was=%s/%s | now=%s/%s | entries re-enabled",
+                    _locked_sess, _locked_day, _cur_macro, _cur_day,
+                    extra={"run_id": run_id},
+                )
+    # ── END POST-WIN SESSION LOCK ──────────────────────────────────────────────
 
     # ── v2.0 WIN CANDLE LOCK ───────────────────────────────────────────────────
     # After a TP win, block new entries until the winning M15 candle has fully

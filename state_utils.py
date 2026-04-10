@@ -141,3 +141,49 @@ def clear_last_win_candle() -> None:
     """
     update_runtime_state(last_win_candle_ts=None)
     logger.info("Win candle lock CLEARED — new M15 candle confirmed, entries re-enabled")
+
+
+# ── v2.1 — Post-Win Session Lock helpers ──────────────────────────────────────
+# After a TP (winning) close, the bot records the macro session (Asian/London/US)
+# and trading day in which the win occurred.  _guard_phase() checks this before
+# allowing a new entry: if the current macro session is the SAME session the win
+# closed in, entry is blocked for the rest of that session.
+#
+# Key design decisions:
+#   - Session-boundary based: resumes naturally when a new macro session opens
+#   - Paired with the existing win candle lock (both can be enabled independently)
+#   - Stored in runtime_state.json so it survives process restarts
+#   - Lock clears automatically when the active macro session changes
+#   - Controlled by new setting: post_win_session_lock (bool, default True)
+
+def set_win_session(macro_session: str, trading_day: str) -> None:
+    """Record the macro session + trading day in which a TP win was detected.
+
+    Called from backfill_pnl() immediately after set_last_win_candle().
+    The combination of macro_session + trading_day uniquely identifies one
+    session block so the lock does not bleed across days.
+    """
+    update_runtime_state(
+        last_win_session=macro_session,
+        last_win_session_day=trading_day,
+    )
+    logger.info(
+        "Post-win SESSION lock SET — session=%s day=%s (no new entry until next session)",
+        macro_session, trading_day,
+    )
+
+
+def get_win_session() -> tuple[str | None, str | None]:
+    """Return (macro_session, trading_day) of the last TP win, or (None, None)."""
+    state = load_json(RUNTIME_STATE_FILE, {})
+    return state.get("last_win_session") or None, state.get("last_win_session_day") or None
+
+
+def clear_win_session() -> None:
+    """Clear the post-win session lock.
+
+    Called by _guard_phase() when it detects the active macro session has
+    changed since the win was recorded.
+    """
+    update_runtime_state(last_win_session=None, last_win_session_day=None)
+    logger.info("Post-win SESSION lock CLEARED — new session detected, entries re-enabled")

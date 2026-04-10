@@ -92,5 +92,7 @@
   "h1_trend_filter_enabled": true,
   "h1_ema_period": 21,
   "require_candle_close": true,
-  "sl_direction_cooldown_min": 60
+  "sl_direction_cooldown_min": 60,
+  "post_win_candle_lock": true,
+  "post_win_session_lock": true
 }
