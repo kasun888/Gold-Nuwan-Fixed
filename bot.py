@@ -73,15 +73,14 @@ HISTORY_FILE = TRADE_HISTORY_FILE
 HISTORY_DAYS = 90
 # Removed: ARCHIVE_FILE — archival removed; 90-day rolling window stored in trade_history.json
 
-# v4.2 — 9-hour trading window: London open (16:00 SGT) → NY morning close (00:59 SGT)
-# v4.4 — All 3 sessions enabled: Asian (08–15), London (16–20), US (21–00).
-# 2-week evaluation to determine Asian session viability for CPR breakouts.
-# Each tuple: (window_name, macro_session, start_hour, end_hour, fallback_threshold)
+# FIXED: Asian session removed from active SESSIONS list.
+# Even if asian_session_enabled=true, Asian hours are low-volume and cause fakeouts.
+# Only London (16:00–20:59 SGT) and US (21:00–00:59 SGT) are active.
+# The settings flag asian_session_enabled provides belt-and-suspenders control.
 SESSIONS = [
-    ("Asian Window",  "Asian",   8, 15, 3),   # 08:00–15:59 SGT (00:00–07:59 GMT)
-    ("London Window", "London", 16, 20, 3),   # 16:00–20:59 SGT (08:00–13:00 GMT)
-    ("US Window",     "US",     21, 23, 3),   # 21:00–23:59 SGT (13:00–16:00 EDT)
-    ("US Window",     "US",      0,  0, 3),   # 00:00–00:59 SGT (16:00–17:00 EDT)
+    ("London Window", "London", 16, 20, 5),   # FIXED: threshold raised to 5
+    ("US Window",     "US",     21, 23, 5),   # FIXED: threshold raised to 5
+    ("US Window",     "US",      0,  0, 5),   # 00:00–00:59 SGT (NY morning close)
 ]
 
 # v4.4 — Three sessions: Asian, London, US
@@ -142,28 +141,29 @@ def validate_settings(settings: dict) -> dict:
     # the bot on startup. The old hard-fail on missing required keys is replaced
     # by setdefault — a missing key is treated the same as any other default.
     # v4.4 — Three sessions active
-    settings.setdefault("spread_limits",             {"Asian": 150, "London": 140, "US": 140})
-    settings.setdefault("max_trades_day",            999)   # v4.0-uncapped
-    settings.setdefault("max_losing_trades_day",     999)   # v4.0-uncapped
-    settings.setdefault("sl_mode",                   "atr_based")   # v4.0
+    # FIXED defaults — tuned for 60% win rate target
+    settings.setdefault("spread_limits",             {"Asian": 999, "London": 120, "US": 120})
+    settings.setdefault("max_trades_day",            2)             # FIXED: was 999, now 2 max per day
+    settings.setdefault("max_losing_trades_day",     2)             # FIXED: was 999, now stop after 2 losses
+    settings.setdefault("sl_mode",                   "atr_based")
     settings.setdefault("tp_mode",                   "rr_multiple")
-    settings.setdefault("rr_ratio",                  2.65)          # v4.2 — read from settings.json
-    settings.setdefault("max_rr_ratio",              3.0)           # v4.6 — hard TP ceiling as multiple of SL
-    settings.setdefault("sl_min_atr_mult",           0.8)           # v5.1 — adaptive SL floor as fraction of ATR
-    settings.setdefault("h1_trend_filter_enabled",   True)          # v5.1 — H1 EMA trend filter
-    settings.setdefault("h1_ema_period",             21)            # v5.1 — H1 EMA period for trend
-    settings.setdefault("require_candle_close",      True)          # v5.1 — wait for M15 candle close
-    settings.setdefault("sl_direction_cooldown_min", 60)            # v5.1 — cooldown after direction guard fires
-    settings.setdefault("signal_threshold",          4)
+    settings.setdefault("rr_ratio",                  2.5)           # FIXED: was 2.65 default but settings had 1.5 — now 2.5
+    settings.setdefault("max_rr_ratio",              3.0)
+    settings.setdefault("sl_min_atr_mult",           1.0)           # FIXED: was 0.8 — raise floor to full ATR
+    settings.setdefault("h1_trend_filter_enabled",   True)
+    settings.setdefault("h1_ema_period",             21)
+    settings.setdefault("require_candle_close",      True)
+    settings.setdefault("sl_direction_cooldown_min", 120)           # FIXED: was 60 — 2h cooldown after direction SL streak
+    settings.setdefault("signal_threshold",          5)             # FIXED: was 4 — require score 5+ for any trade
     settings.setdefault("position_full_usd",         100)
     settings.setdefault("position_partial_usd",      66)
     settings.setdefault("account_balance_override",  0)
     settings.setdefault("enabled",                   True)
-    settings.setdefault("atr_sl_multiplier",         1.0)           # v4.0 — raised from 0.5
-    settings.setdefault("sl_min_usd",                15.0)          # v4.0 — raised from 4.0
-    settings.setdefault("sl_max_usd",                40.0)          # v4.0 — raised from 20.0
-    settings.setdefault("fixed_sl_usd",              20.0)          # v4.0 — raised from 5.0
-    settings.setdefault("breakeven_trigger_usd",     15.0)          # v4.0 — raised from 3.0
+    settings.setdefault("atr_sl_multiplier",         1.5)           # FIXED: was 1.0 — gold needs wider SL
+    settings.setdefault("sl_min_usd",                35.0)          # FIXED: was 15.0 — $25 was too tight
+    settings.setdefault("sl_max_usd",                50.0)          # FIXED: was 40.0
+    settings.setdefault("fixed_sl_usd",              35.0)          # FIXED: was 20.0
+    settings.setdefault("breakeven_trigger_usd",     35.0)          # FIXED: was 15.0 — trigger BE at 1x SL
     settings.setdefault("sl_pct",                   0.0025)
     settings.setdefault("tp_pct",                   0.0075)
     settings.setdefault("margin_safety_factor",      0.6)
@@ -176,17 +176,16 @@ def validate_settings(settings: dict) -> dict:
     settings.setdefault("news_lookahead_min",         120)
     settings.setdefault("news_medium_penalty_score",  -1)
     settings.setdefault("fixed_tp_usd",              None)
-    settings.setdefault("loss_streak_cooldown_min",   0)    # v4.0-uncapped — disabled
+    settings.setdefault("loss_streak_cooldown_min",   120)   # FIXED: was 0 — now 2h cooldown after 2 losses
     settings.setdefault("max_concurrent_trades",      1)
-    # v4.0-uncapped — per-session caps removed
-    settings.setdefault("max_trades_london",          999)
-    settings.setdefault("max_trades_us",              999)
-    settings.setdefault("max_spread_pips",            150)
+    settings.setdefault("max_trades_london",          2)     # FIXED: was 999 — max 2 London trades
+    settings.setdefault("max_trades_us",              1)     # FIXED: was 999 — max 1 US trade
+    settings.setdefault("max_spread_pips",            130)   # FIXED: was 150
     settings.setdefault("session_only",               True)
-    settings.setdefault("session_thresholds",         {"Asian": 4, "London": 4, "US": 4})
+    settings.setdefault("session_thresholds",         {"Asian": 6, "London": 5, "US": 5})  # FIXED: raise thresholds
     settings.setdefault("news_filter_enabled",        True)
-    settings.setdefault("news_block_before_min",      30)
-    settings.setdefault("news_block_after_min",       30)
+    settings.setdefault("news_block_before_min",      45)    # FIXED: was 30 — wider news window
+    settings.setdefault("news_block_after_min",       45)    # FIXED: was 30
     # ── Pyramid (Trade 2 add-on) settings ─────────────────────────────────────
     settings.setdefault("pyramid_enabled",            False)
     settings.setdefault("pyramid_min_score",          5)
@@ -194,18 +193,17 @@ def validate_settings(settings: dict) -> dict:
     settings.setdefault("pyramid_max_risk_usd",       50)
     # v4.2 — trading day boundary and per-session loss sub-cap
     settings.setdefault("trading_day_start_hour_sgt", 8)
-    settings.setdefault("max_losing_trades_session",  999)  # v4.0-uncapped
+    settings.setdefault("max_losing_trades_session",  1)     # FIXED: was 999 — stop after 1 loss per session
+    settings.setdefault("max_trades_asian",           0)     # FIXED: was 5 — Asian session disabled
     settings.setdefault("midnight_guard_min",         0)
     # v4.2 — trading window explicit boundary
     settings.setdefault("session_start_hour_sgt",     16)
     settings.setdefault("session_end_hour_sgt",        1)
     # v4.2 — same-setup re-entry cooldown (microsecond bug fixed in v4.0)
-    settings.setdefault("same_setup_cooldown_min",     15)
-    # v2.0 — Win candle lock: block re-entry on the same M15 candle after a TP win
-    # Set to false to disable (not recommended — reverts to v1 behaviour)
+    settings.setdefault("same_setup_cooldown_min",     30)    # FIXED: was 15 — 30min between same setups
+    # v2.0 — Win candle lock
     settings.setdefault("post_win_candle_lock",        True)
-    settings.setdefault("post_win_session_lock",       True)   # v2.1 — block rest of session after a win
-    # NOTE: fallback_tp_multiplier removed in v4.0 — ATR-based SL makes it redundant
+    settings.setdefault("post_win_session_lock",       True)
 
     cooldown_min = int(settings.get("loss_streak_cooldown_min", 30))
     if cooldown_min < 0:
@@ -505,7 +503,7 @@ def compute_sl_usd(levels: dict, settings: dict) -> float:
         atr = levels.get("atr")
         if atr and atr > 0:
             mult         = float(settings.get("atr_sl_multiplier", 1.0))
-            sl_min_fixed = float(settings.get("sl_min_usd", 25.0))
+            sl_min_fixed = float(settings.get("sl_min_usd", 35.0))
             sl_max       = float(settings.get("sl_max_usd", 60.0))
             # v5.1 — adaptive floor: sl_min = max(fixed_floor, ATR × sl_min_atr_mult)
             # On quiet days (ATR $20) floor adapts down to $16 instead of locking at $35.
@@ -549,7 +547,7 @@ def compute_tp_usd(levels: dict, sl_usd: float, settings: dict) -> float:
       3. Fallback: sl_usd x rr_ratio (min RR multiple).
     All results capped at sl_usd x max_rr_ratio.
     """
-    min_rr  = float(settings.get("rr_ratio", 2.65))
+    min_rr  = float(settings.get("rr_ratio", 2.5))
     max_rr  = float(settings.get("max_rr_ratio", 3.0))
     tp_ceil = round(sl_usd * max_rr, 2)   # hard ceiling regardless of source
 
@@ -588,7 +586,7 @@ def derive_rr_ratio(levels: dict, sl_usd: float, tp_usd: float, settings: dict) 
         pass
     if sl_usd > 0 and tp_usd > 0:
         return round(tp_usd / sl_usd, 2)
-    return float(settings.get("rr_ratio", 2.65))
+    return float(settings.get("rr_ratio", 2.5))
 
 
 # Note: compute_atr_sl_usd alias removed — no external callers exist in this codebase
@@ -756,7 +754,7 @@ def check_breakeven(history: list, trader, alert, settings: dict):
     once per trade.
     """
     demo    = settings.get("demo_mode", True)
-    sl_min  = float(settings.get("sl_min_usd", 20.0))
+    sl_min  = float(settings.get("sl_min_usd", 35.0))
     changed = False
 
     for trade in history:
@@ -1722,7 +1720,7 @@ def _signal_phase(db, run_id, settings, alert, trader, history, now_sgt, today, 
     # v4.1: RR gate using the ACTUAL executed SL (not the signal-engine estimate).
     # signals.py validates RR against its own 0.25% fixed SL (~$11-12).
     # bot.py uses ATR-based SL ($15-40) which can be 3x larger, breaking the RR.
-    _min_rr = float(settings.get("rr_ratio", 2.65))
+    _min_rr = float(settings.get("rr_ratio", 2.5))
     if rr_ratio < _min_rr:
         _rr_reason = (
             f"Actual R:R {rr_ratio:.2f} < minimum {_min_rr:.1f} "

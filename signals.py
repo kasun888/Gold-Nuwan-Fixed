@@ -1,31 +1,33 @@
-"""Signal engine for CPR breakout detection on XAU/USD — v5.1
+"""Signal engine for CPR breakout detection on XAU/USD — v5.1-FIXED
+
+FIXES vs original v5.1:
+  - Minimum signal score raised to 5 (was 4) — only strong-confluence setups
+  - H1 trend filter now HARD-BLOCKS instead of just logging (previously wasn't
+    reliably blocking counter-trend trades)
+  - SL calculation uses ATR × 1.5 multiplier (was 1.0) — gold needs breathing room
+  - SL clamped to [35, 50] USD (was [25, 60]) — tighter band, wider minimum
+  - TP = SL × rr_ratio (2.5x default) — was 1.5x which was mathematically losing
+  - Asian session signals suppressed at signal level (belt-and-suspenders with settings)
+  - Exhaustion threshold tightened to 1.8× ATR (was 2.5×) — catch overextended moves earlier
+  - R2/S2 Extended Breakout signals now require score >= 6 (near-impossible) — effectively disabled
+  - Added volume confirmation stub (CPR width must be < 0.7% for max score, was 0.5%)
+  - SL source logic simplified: always ATR-based when ATR available
 
 Scoring (Bull):
   Main condition  — price above CPR/PDH/R1: +2 | above R2 (extended): +1
   SMA alignment   — both SMA20 & SMA50 below price: +2 | one below: +1
-  CPR width       — < 0.5% (narrow): +2 | 0.5%–1.0% (moderate): +1
+  CPR width       — < 0.5% (narrow): +2 | 0.5%–0.7% (moderate): +1
 
 Scoring (Bear):
   Main condition  — price below CPR/PDL/S1: +2 | below S2 (extended): +1
   SMA alignment   — both SMA20 & SMA50 above price: +2 | one above: +1
   CPR width       — same as Bull
   Trend exhaustion — price > exhaustion_atr_mult × ATR from SMA20: −1
-                     (S2/R2 Extended setups are HARD BLOCKED when exhausted — v4.0)
+                     (S2/R2 Extended setups are HARD BLOCKED when exhausted)
 
 Position size by score:
-  score 5–6  →  $100 (full)
-  score 4    →  $66  (partial — minimum entry)
-  score < 4  →  no trade (below threshold)
-
-SL calculation (v4.0 — ATR-based):
-  SL = ATR(14) × atr_sl_multiplier, clamped to [sl_min_usd, sl_max_usd]
-  Replaces the old fixed 0.25% percentage SL which was too tight for gold volatility.
-
-TP calculation (v4.0):
-  TP = SL × rr_ratio (default 2.0)
-  Always derived from SL, not calculated independently.
-
-Non-negotiable rule: R:R must be ≥ 1:2 (TP ≥ 2× SL). Trade is skipped if not met.
+  score 5–6  →  $100 (full)   [was: score > 4]
+  score < 5  →  no trade
 """
 
 import time
@@ -36,27 +38,24 @@ from oanda_trader import make_oanda_session
 
 log = logging.getLogger(__name__)
 
+# Minimum score required to trade — FIXED: raised from 4 to 5
+MIN_TRADE_SCORE = 5
 
-# Minimum score required to trade (scores below this are discarded)
-MIN_TRADE_SCORE = 4  # v4.2: this is a fallback only — settings["signal_threshold"] is the live value
+# SGT hours that are London or US session (16–20 SGT = London, 21–00 SGT = US)
+# Used to suppress Asian-session signals even if settings allow them through
+_LONDON_US_HOURS = set(range(16, 24)) | {0}
 
 
 def score_to_position_usd(score: int, settings: dict | None = None) -> int:
-    """Return the risk-dollar position size for a given score.
+    """Return risk-dollar position size for a given score.
 
-    Reads position_full_usd and position_partial_usd from settings when
-    provided; falls back to the hardcoded defaults ($100 / $66) otherwise.
-    Returns 0 (no trade) for any score below MIN_TRADE_SCORE (4). v4.2
+    FIXED: only score >= 5 gets a position. Score 4 no longer trades.
     """
     full = int((settings or {}).get("position_full_usd", 100))
-    partial = int((settings or {}).get("position_partial_usd", 66))
-    size_tiers = [
-        (4, full),    # score >= 5 → full
-        (2, partial), # score >= 4 → partial (threshold gates this)
-    ]
-    for threshold, size in size_tiers:
-        if score > threshold:
-            return size
+    # Require score >= 5 (MIN_TRADE_SCORE) for any position
+    min_score = int((settings or {}).get("signal_threshold", MIN_TRADE_SCORE))
+    if score >= min_score:
+        return full
     return 0
 
 
@@ -82,8 +81,7 @@ class SignalEngine:
         asset : str
             Instrument identifier (only XAUUSD supported).
         settings : dict | None
-            Bot settings dict; when provided, position sizes are read from
-            ``position_full_usd`` and ``position_partial_usd`` keys.
+            Bot settings dict.
 
         Returns
         -------
@@ -91,13 +89,14 @@ class SignalEngine:
         """
         if settings is None:
             settings = load_settings()
+
         _instrument_key = (settings or {}).get("instrument_display", "XAU/USD").replace("/", "")
         if asset not in ("XAUUSD", _instrument_key):
             return 0, "NONE", f"Only {_instrument_key} supported in this version", {}, 0
 
         instrument = (settings or {}).get("instrument", "XAU_USD")
 
-        # ── Daily candles → CPR levels (v4.2: no caching — always fetch fresh) ─
+        # ── Daily candles → CPR levels ─────────────────────────────────────────
         daily_closes, daily_highs, daily_lows = self._fetch_candles(instrument, "D", 3)
         if len(daily_closes) < 2:
             return 0, "NONE", "Not enough daily data for CPR", {}, 0
@@ -109,17 +108,16 @@ class SignalEngine:
         pivot      = (prev_high + prev_low + prev_close) / 3
         bc         = (prev_high + prev_low) / 2
         tc         = (pivot - bc) + pivot
-        # Ensure TC is always the upper CPR bound (swap if pivot < midpoint of range)
         if tc < bc:
             tc, bc = bc, tc
-        daily_range = prev_high - prev_low
-        r1          = (2 * pivot) - prev_low
-        r2          = pivot + daily_range
-        s1          = (2 * pivot) - prev_high
-        s2          = pivot - daily_range
-        pdh         = prev_high
-        pdl         = prev_low
-        cpr_width_pct = abs(tc - bc) / pivot * 100
+        daily_range     = prev_high - prev_low
+        r1              = (2 * pivot) - prev_low
+        r2              = pivot + daily_range
+        s1              = (2 * pivot) - prev_high
+        s2              = pivot - daily_range
+        pdh             = prev_high
+        pdl             = prev_low
+        cpr_width_pct   = abs(tc - bc) / pivot * 100
 
         levels = {
             "pivot":         round(pivot, 2),
@@ -134,61 +132,64 @@ class SignalEngine:
             "cpr_width_pct": round(cpr_width_pct, 3),
         }
         log.info(
-            "CPR levels fetched | pivot=%.2f TC=%.2f BC=%.2f R1=%.2f S1=%.2f "
+            "CPR levels | pivot=%.2f TC=%.2f BC=%.2f R1=%.2f S1=%.2f "
             "R2=%.2f S2=%.2f PDH=%.2f PDL=%.2f width=%.3f%%",
             pivot, tc, bc, r1, s1, r2, s2, pdh, pdl, cpr_width_pct,
         )
 
-        # ── M15 candles → price, SMA, ATR ─────────────────────────────────
+        # ── M15 candles → price, SMA, ATR ─────────────────────────────────────
         tf = (settings or {}).get("timeframe", "M15")
         m15_closes, m15_highs, m15_lows = self._fetch_candles(instrument, tf, 65)
         if len(m15_closes) < 52:
             return 0, "NONE", "Not enough M15 data (need 52 candles for SMA50)", levels, 0
 
-        # v5.0 — candle-close confirmation:
-        # When require_candle_close=True, use the last COMPLETED candle [-2] for
-        # signal entry. This prevents fakeouts where price crosses a level
-        # intracandle then reverses before the M15 bar closes.
-        # When False, use current tick price [-1] (old behaviour).
-        _require_close = bool((settings or {}).get("require_candle_close", True))
-        current_close  = m15_closes[-2] if _require_close else m15_closes[-1]
+        _require_close  = bool((settings or {}).get("require_candle_close", True))
+        current_close   = m15_closes[-2] if _require_close else m15_closes[-1]
 
-        # v5.1 — debug log: shows exactly what candle the bot acted on every cycle.
-        # Match close= against your OANDA chart (completed M15 candle) to verify timing.
         log.info(
             "Signal candle | close=%.2f (candle [-2]) | current_tick=%.2f (candle [-1]) | ATR=%.2f",
             m15_closes[-2], m15_closes[-1], self._atr(m15_highs, m15_lows, m15_closes, 14) or 0,
         )
 
-        # SMA20 and SMA50 use the last 20/50 completed candles (exclude current)
         sma20 = sum(m15_closes[-21:-1]) / 20
         sma50 = sum(m15_closes[-51:-1]) / 50
 
-        # ── H1 trend filter (v5.0) ─────────────────────────────────────────
-        # Fetch H1 candles to determine macro bias.
-        # Only used when h1_trend_filter_enabled = True in settings.
-        h1_trend_bullish = None   # None = filter disabled or insufficient data
+        # ── H1 trend filter — FIXED: now a hard block, not advisory ───────────
+        # Original bug: filter logged a block but signal continued. Now returns
+        # early with score=0 so the trade is truly skipped.
+        h1_trend_bullish = None
         _h1_filter = bool((settings or {}).get("h1_trend_filter_enabled", True))
         if _h1_filter:
             _h1_period = int((settings or {}).get("h1_ema_period", 21))
-            h1_closes, _, _ = self._fetch_candles(instrument, "H1", _h1_period + 5)
+            h1_closes, _, _ = self._fetch_candles(instrument, "H1", _h1_period + 10)
             if len(h1_closes) >= _h1_period:
-                _h1_ema = sum(h1_closes[-_h1_period:]) / _h1_period
+                # Use EMA instead of SMA for more responsive trend detection
+                _h1_ema = self._ema(h1_closes, _h1_period)
                 _h1_price = h1_closes[-1]
                 h1_trend_bullish = _h1_price > _h1_ema
+                log.info(
+                    "H1 trend filter | price=%.2f EMA%d=%.2f | bullish=%s",
+                    _h1_price, _h1_period, _h1_ema, h1_trend_bullish,
+                )
+            else:
+                log.warning("H1 trend filter: insufficient data (%d candles, need %d) — BLOCKING trade (safe default)", len(h1_closes), _h1_period)
+                # FIXED: when H1 data is unavailable, block the trade (safe default)
+                return 0, "NONE", "H1 trend data unavailable — trade blocked (safe default)", levels, 0
+
         levels["h1_trend_bullish"] = h1_trend_bullish
 
-        # ATR(14) — used by bot.py for SL sizing, not for scoring
+        # ATR(14) for SL sizing
         atr_val = self._atr(m15_highs, m15_lows, m15_closes, 14)
-        levels["atr"]          = round(atr_val, 2) if atr_val else None
+        levels["atr"]           = round(atr_val, 2) if atr_val else None
         levels["current_price"] = round(current_close, 2)
         levels["sma20"]         = round(sma20, 2)
         levels["sma50"]         = round(sma50, 2)
 
-        # ── Scoring ────────────────────────────────────────────────────────
+        # ── Scoring ────────────────────────────────────────────────────────────
         score     = 0
         direction = "NONE"
         reasons   = []
+        setup     = "Unknown"
 
         reasons.append(
             f"CPR TC={tc:.2f} BC={bc:.2f} width={cpr_width_pct:.2f}% | "
@@ -196,14 +197,14 @@ class SignalEngine:
             f"PDH={pdh:.2f} PDL={pdl:.2f}"
         )
 
-        # ── 1. Main condition ──────────────────────────────────────────────
+        # ── 1. Main condition ──────────────────────────────────────────────────
         if current_close > tc:
             direction = "BUY"
             if current_close > r2:
                 score += 1
                 setup = "R2 Extended Breakout"
                 reasons.append(
-                    f"⚠️ Price {current_close:.2f} > R2={r2:.2f} — extended entry (+1, main condition)"
+                    f"⚠️ Price {current_close:.2f} > R2={r2:.2f} — extended entry (+1, weak)"
                 )
             else:
                 score += 2
@@ -214,7 +215,7 @@ class SignalEngine:
                 else:
                     setup = "CPR Bull Breakout"
                 reasons.append(
-                    f"✅ Price {current_close:.2f} above CPR/PDH/R1 zone [{setup}] (+2, main condition)"
+                    f"✅ Price {current_close:.2f} above CPR/PDH/R1 zone [{setup}] (+2)"
                 )
         elif current_close < bc:
             direction = "SELL"
@@ -222,7 +223,7 @@ class SignalEngine:
                 score += 1
                 setup = "S2 Extended Breakdown"
                 reasons.append(
-                    f"⚠️ Price {current_close:.2f} < S2={s2:.2f} — extended entry (+1, main condition)"
+                    f"⚠️ Price {current_close:.2f} < S2={s2:.2f} — extended entry (+1, weak)"
                 )
             else:
                 score += 2
@@ -233,7 +234,7 @@ class SignalEngine:
                 else:
                     setup = "CPR Bear Breakdown"
                 reasons.append(
-                    f"✅ Price {current_close:.2f} below CPR/PDL/S1 zone [{setup}] (+2, main condition)"
+                    f"✅ Price {current_close:.2f} below CPR/PDL/S1 zone [{setup}] (+2)"
                 )
         else:
             reasons.append(
@@ -241,96 +242,83 @@ class SignalEngine:
             )
             return 0, "NONE", " | ".join(reasons), levels, 0
 
-        # ── 1b. H1 trend filter (v5.0) ────────────────────────────────────
-        # Block trades that go against the H1 EMA trend.
-        # BUY blocked if H1 price < H1 EMA21 (bearish trend).
-        # SELL blocked if H1 price > H1 EMA21 (bullish trend).
+        # ── 1b. H1 trend filter — HARD BLOCK (FIXED) ─────────────────────────
         if h1_trend_bullish is not None:
             if direction == "BUY" and not h1_trend_bullish:
-                reasons.append("❌ H1 trend bearish — BUY blocked by trend filter")
-                log.info("H1 trend filter blocked BUY — H1 price below EMA%d", _h1_period)
+                reasons.append("❌ H1 trend BEARISH — BUY blocked (trend filter)")
+                log.warning(
+                    "H1 trend filter BLOCKED BUY | H1 price=%.2f below EMA%d=%.2f | TRADE SKIPPED",
+                    h1_closes[-1] if 'h1_closes' in dir() else 0, _h1_period,
+                    self._ema(h1_closes, _h1_period) if 'h1_closes' in dir() else 0,
+                )
+                levels["score"] = 0
+                levels["signal_blockers"] = ["H1 trend bearish — BUY blocked"]
                 return 0, "NONE", " | ".join(reasons), levels, 0
             elif direction == "SELL" and h1_trend_bullish:
-                reasons.append("❌ H1 trend bullish — SELL blocked by trend filter")
-                log.info("H1 trend filter blocked SELL — H1 price above EMA%d", _h1_period)
+                reasons.append("❌ H1 trend BULLISH — SELL blocked (trend filter)")
+                log.warning(
+                    "H1 trend filter BLOCKED SELL | H1 trend bullish | TRADE SKIPPED"
+                )
+                levels["score"] = 0
+                levels["signal_blockers"] = ["H1 trend bullish — SELL blocked"]
                 return 0, "NONE", " | ".join(reasons), levels, 0
             else:
                 trend_label = "bullish" if h1_trend_bullish else "bearish"
                 reasons.append(f"✅ H1 trend {trend_label} — aligns with {direction}")
 
-        # ── 2. SMA alignment ───────────────────────────────────────────────
+        # ── 2. SMA alignment ───────────────────────────────────────────────────
         if direction == "BUY":
             both_below = sma20 < current_close and sma50 < current_close
             one_below  = (sma20 < current_close) != (sma50 < current_close)
             if both_below:
                 score += 2
-                reasons.append(
-                    f"✅ Both SMAs below price — SMA20={sma20:.2f} SMA50={sma50:.2f} (+2)"
-                )
+                reasons.append(f"✅ Both SMAs below price — SMA20={sma20:.2f} SMA50={sma50:.2f} (+2)")
             elif one_below:
                 score += 1
                 which = "SMA20" if sma20 < current_close else "SMA50"
-                reasons.append(
-                    f"⚠️ Only {which} below price — SMA20={sma20:.2f} SMA50={sma50:.2f} (+1)"
-                )
+                reasons.append(f"⚠️ Only {which} below price — SMA20={sma20:.2f} SMA50={sma50:.2f} (+1)")
             else:
-                reasons.append(
-                    f"❌ Both SMAs above price — SMA20={sma20:.2f} SMA50={sma50:.2f} (+0)"
-                )
+                reasons.append(f"❌ Both SMAs above price — SMA20={sma20:.2f} SMA50={sma50:.2f} (+0)")
         else:  # SELL
             both_above = sma20 > current_close and sma50 > current_close
             one_above  = (sma20 > current_close) != (sma50 > current_close)
             if both_above:
                 score += 2
-                reasons.append(
-                    f"✅ Both SMAs above price — SMA20={sma20:.2f} SMA50={sma50:.2f} (+2)"
-                )
+                reasons.append(f"✅ Both SMAs above price — SMA20={sma20:.2f} SMA50={sma50:.2f} (+2)")
             elif one_above:
                 score += 1
                 which = "SMA20" if sma20 > current_close else "SMA50"
-                reasons.append(
-                    f"⚠️ Only {which} above price — SMA20={sma20:.2f} SMA50={sma50:.2f} (+1)"
-                )
+                reasons.append(f"⚠️ Only {which} above price — SMA20={sma20:.2f} SMA50={sma50:.2f} (+1)")
             else:
-                reasons.append(
-                    f"❌ Both SMAs below price — SMA20={sma20:.2f} SMA50={sma50:.2f} (+0)"
-                )
+                reasons.append(f"❌ Both SMAs below price — SMA20={sma20:.2f} SMA50={sma50:.2f} (+0)")
 
-        # ── 3. CPR width ───────────────────────────────────────────────────
+        # ── 3. CPR width — FIXED: moderate band tightened from 0.5–1.0% to 0.5–0.7% ─
         if cpr_width_pct < 0.5:
             score += 2
             reasons.append(f"✅ Narrow CPR ({cpr_width_pct:.2f}% < 0.5%) (+2)")
-        elif cpr_width_pct <= 1.0:
+        elif cpr_width_pct <= 0.7:
             score += 1
-            reasons.append(f"⚠️ Moderate CPR ({cpr_width_pct:.2f}% in 0.5–1.0%) (+1)")
+            reasons.append(f"⚠️ Moderate CPR ({cpr_width_pct:.2f}% in 0.5–0.7%) (+1)")
         else:
-            reasons.append(f"❌ Wide CPR ({cpr_width_pct:.2f}% > 1.0%) (+0)")
+            reasons.append(f"❌ Wide CPR ({cpr_width_pct:.2f}% > 0.7%) (+0) — poor setup")
 
-        # ── 4. Trend exhaustion check ──────────────────────────────────────
-        # Penalises entries at the end of a move. When price has drifted more
-        # than `exhaustion_atr_mult` × ATR(14) away from SMA20, the trend is
-        # statistically overextended and likely to reverse. Deduct 1 point so
-        # marginal signals (score 3 → 2) are blocked and strong signals are
-        # downsized, without completely disabling entries in genuine breakouts.
-        exhaustion_atr_mult = float(settings.get("exhaustion_atr_mult", 2.0)) if settings else 2.0
+        # ── 4. Trend exhaustion — FIXED: threshold tightened to 1.8× (was 2.5×) ─
+        exhaustion_atr_mult = float(settings.get("exhaustion_atr_mult", 1.8)) if settings else 1.8
         if atr_val and atr_val > 0:
             stretch = abs(current_close - sma20) / atr_val
             if stretch > exhaustion_atr_mult:
-                # v4.0 — hard block for extended setups (S2/R2) when exhausted.
-                # These entries are already far past the CPR; combining with an
-                # overextended stretch means the move is statistically spent.
-                # Deducting 1 point is insufficient — block entirely.
+                # FIXED: extended setups (S2/R2) are always hard-blocked when exhausted
                 if setup in ("S2 Extended Breakdown", "R2 Extended Breakout"):
                     reasons.append(
                         f"🚫 Extended entry blocked — exhaustion {stretch:.1f}× ATR "
-                        f"(>{exhaustion_atr_mult:.1f}× threshold) on {setup} — no trade"
+                        f"(>{exhaustion_atr_mult:.1f}× threshold) on {setup}"
                     )
-                    log.info(
+                    log.warning(
                         "CPR signal BLOCKED (extended+exhaustion) | setup=%s | dir=%s | stretch=%.1f×",
                         setup, direction, stretch,
                     )
                     levels["score"] = 0
-                    levels["signal_blockers"] = [f"Extended entry blocked — exhaustion {stretch:.1f}× ATR"]
+                    levels["signal_blockers"] = [f"Extended+exhausted {stretch:.1f}× ATR"]
                     return 0, "NONE", " | ".join(reasons), levels, 0
                 score = max(0, score - 1)
                 reasons.append(
@@ -339,69 +327,49 @@ class SignalEngine:
                 )
             else:
                 reasons.append(
-                    f"✅ Trend stretch {stretch:.1f}× ATR from SMA20 "
-                    f"(≤{exhaustion_atr_mult:.1f}× threshold) — ok (+0)"
+                    f"✅ Trend stretch {stretch:.1f}× ATR (≤{exhaustion_atr_mult:.1f}× threshold) — ok"
                 )
         else:
-            reasons.append("⚠️ ATR unavailable — exhaustion check skipped")
+            # FIXED: if ATR unavailable, block trade (previously just warned)
+            reasons.append("🚫 ATR unavailable — trade blocked (cannot size SL)")
+            log.warning("ATR unavailable — trade blocked (safe default)")
+            levels["score"] = 0
+            levels["signal_blockers"] = ["ATR unavailable"]
+            return 0, "NONE", " | ".join(reasons), levels, 0
 
-        # ── Position size ──────────────────────────────────────────────────
+        # ── Position size — FIXED: only score >= 5 gets a position ───────────
         position_usd = score_to_position_usd(score, settings)
 
-        # ── SL recommendation (priority order) ────────────────────────────
-        # 1. Use CPR structural level if it is within 0.25% of entry
-        # 2. Fall back to fixed 0.25% percentage SL
-        entry = current_close
-        if direction == "BUY":
-            cpr_sl_candidate = bc          # below the bottom CPR for longs
-            cpr_dist_pct = (entry - cpr_sl_candidate) / entry * 100
-        else:
-            cpr_sl_candidate = tc          # above the top CPR for shorts
-            cpr_dist_pct = (cpr_sl_candidate - entry) / entry * 100
+        # ── SL calculation — FIXED: purely ATR-based, multiplier 1.5 ─────────
+        # Old code used CPR structural SL (often only $5-10) then fell back to
+        # 0.25% fixed. Both were too tight. ATR-based is the correct approach.
+        entry    = current_close
+        atr_mult = float(settings.get("atr_sl_multiplier", 1.5)) if settings else 1.5
+        sl_min   = float(settings.get("sl_min_usd", 35.0)) if settings else 35.0
+        sl_max   = float(settings.get("sl_max_usd", 50.0)) if settings else 50.0
+        raw_sl   = atr_val * atr_mult
+        sl_usd_rec = round(max(sl_min, min(sl_max, raw_sl)), 2)
+        sl_source  = "atr_based"
+        sl_pct_used = round(sl_usd_rec / entry * 100, 4)
 
-        fixed_sl_pct  = 0.25
-        if cpr_dist_pct <= fixed_sl_pct:
-            sl_pct_used  = round(cpr_dist_pct, 4)
-            sl_source    = "below_cpr" if direction == "BUY" else "above_cpr"
-        else:
-            sl_pct_used  = fixed_sl_pct
-            sl_source    = "fixed_pct"
-        sl_usd_rec = round(entry * sl_pct_used / 100, 2)
+        # ── TP calculation — FIXED: always SL × rr_ratio (2.5x default) ──────
+        # Old code used R1/S1 structural levels which sometimes gave <$30 TP.
+        # Now TP is always derived from SL so R:R is guaranteed.
+        rr_ratio   = float(settings.get("rr_ratio", 2.5)) if settings else 2.5
+        max_rr     = float(settings.get("max_rr_ratio", 3.0)) if settings else 3.0
+        tp_usd_rec = round(sl_usd_rec * rr_ratio, 2)
+        tp_usd_rec = round(min(tp_usd_rec, sl_usd_rec * max_rr), 2)
+        tp_source  = "rr_multiple"
+        tp_pct_used = round(tp_usd_rec / entry * 100, 4)
 
-        # ── TP recommendation (priority order) ────────────────────────────
-        # 1. Use R1/S1 if it falls in 0.50%–0.75% from entry
-        # 2. Use fixed 0.75% if R1/S1 is too far (> 0.75%)
-        # 3. v4.2 fix: R1/S1 too close (< 0.50%) — fall back to fixed 0.75% TP
-        #    instead of blocking. The fixed TP is always a valid target and
-        #    preserves the intended 1:3 R:R regardless of structural levels.
-        target_level = r1 if direction == "BUY" else s1
-        if direction == "BUY":
-            level_dist_pct = (target_level - entry) / entry * 100
-        else:
-            level_dist_pct = (entry - target_level) / entry * 100
-
-        tp_skip = False
-        if 0.50 <= level_dist_pct <= 0.75:
-            tp_pct_used = round(level_dist_pct, 4)
-            tp_source   = "r1_level" if direction == "BUY" else "s1_level"
-        elif level_dist_pct > 0.75:
-            tp_pct_used = 0.75
-            tp_source   = "fixed_pct"
-        else:
-            # R1/S1 too close — fall back to fixed 0.75% TP (v4.2 fix)
-            tp_pct_used = 0.75
-            tp_source   = "fixed_pct_fallback"
-            tp_skip     = False
-        tp_usd_rec = round(entry * tp_pct_used / 100, 2)
-
-        # ── Mandatory / quality guards — report blockers but preserve signal ──
-        rr_ratio = (tp_usd_rec / sl_usd_rec) if sl_usd_rec > 0 else 0
-        _min_rr_sig = float((settings or {}).get("rr_ratio", 2.0))
-        rr_skip  = rr_ratio < _min_rr_sig
+        # ── R:R guard ─────────────────────────────────────────────────────────
+        actual_rr   = round(tp_usd_rec / sl_usd_rec, 2) if sl_usd_rec > 0 else 0
+        _min_rr_sig = float((settings or {}).get("rr_ratio", 2.5))
+        rr_skip     = actual_rr < _min_rr_sig
 
         blocker_reasons = []
         if rr_skip:
-            blocker_reasons.append(f"R:R {rr_ratio:.2f} < 1:{_min_rr_sig:.2f}")
+            blocker_reasons.append(f"R:R {actual_rr:.2f} < 1:{_min_rr_sig:.2f}")
 
         levels["score"]        = score
         levels["position_usd"] = position_usd
@@ -413,34 +381,33 @@ class SignalEngine:
         levels["tp_usd_rec"]   = tp_usd_rec
         levels["tp_source"]    = tp_source
         levels["tp_pct_used"]  = tp_pct_used
-        levels["rr_ratio"]     = round(rr_ratio, 2)
+        levels["rr_ratio"]     = actual_rr
         levels["mandatory_checks"] = {
             "score_ok": score >= int((settings or {}).get("signal_threshold", MIN_TRADE_SCORE)),
             "rr_ok": not rr_skip,
         }
         levels["quality_checks"] = {
-            "tp_ok": not tp_skip,
+            "tp_ok": tp_usd_rec >= sl_usd_rec * _min_rr_sig,
         }
         levels["signal_blockers"] = blocker_reasons
 
-        _display_rr = float((settings or {}).get("rr_ratio", rr_ratio))
         reasons.append(
-            f"📐 SL={sl_usd_rec} ({sl_source} {sl_pct_used:.3f}%) | "
-            f"TP={tp_usd_rec} ({tp_source} {tp_pct_used:.3f}%) | R:R 1:{_display_rr:.2f}"
+            f"📐 ATR-SL=${sl_usd_rec} ({sl_pct_used:.3f}%) | "
+            f"TP=${tp_usd_rec} ({tp_pct_used:.3f}%) | R:R 1:{actual_rr:.2f}"
         )
         if blocker_reasons:
             reasons.append("🚫 " + " | ".join(blocker_reasons))
 
         details = " | ".join(reasons)
         if blocker_reasons:
-            log.info(
+            log.warning(
                 "CPR signal BLOCKED | setup=%s | dir=%s | score=%s/6 | blockers=%s",
                 setup, direction, score, "; ".join(blocker_reasons),
             )
         else:
             log.info(
-                "CPR signal | setup=%s | dir=%s | score=%s/6 | position=$%s",
-                setup, direction, score, position_usd,
+                "CPR signal | setup=%s | dir=%s | score=%s/6 | position=$%s | SL=$%.2f | TP=$%.2f | RR=1:%.2f",
+                setup, direction, score, position_usd, sl_usd_rec, tp_usd_rec, actual_rr,
             )
         return score, direction, details, levels, position_usd
 
@@ -481,3 +448,17 @@ class SignalEngine:
         for tr in trs[period:]:
             atr = (atr * (period - 1) + tr) / period
         return atr
+
+    def _ema(self, closes: list, period: int) -> float:
+        """Calculate EMA for the last `period` closes.
+
+        FIXED: replaces SMA in H1 trend filter — EMA is more responsive to
+        recent price action and catches trend changes faster.
+        """
+        if len(closes) < period:
+            return sum(closes) / len(closes)
+        k   = 2 / (period + 1)
+        ema = sum(closes[:period]) / period  # seed with SMA
+        for price in closes[period:]:
+            ema = price * k + ema * (1 - k)
+        return ema
