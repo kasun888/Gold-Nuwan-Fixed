@@ -1,5 +1,5 @@
 {
-  "bot_name": "CPR Gold Bot v5.1-FIXED",
+  "bot_name": "CPR Gold Bot v5.1-FIXED-v2",
   "demo_mode": true,
   "trade_gold": true,
 
@@ -7,17 +7,19 @@
   "position_full_usd": 100,
   "position_partial_usd": 66,
 
-  "sl_mode": "atr_based",
-  "tp_mode": "rr_multiple",
+  "sl_mode": "fixed_usd",
+  "tp_mode": "fixed_usd",
   "atr_sl_multiplier": 1.5,
-  "sl_min_usd": 35.0,
-  "sl_max_usd": 50.0,
+  "sl_min_usd": 30.0,
+  "sl_max_usd": 30.0,
   "sl_min_atr_mult": 1.0,
-  "rr_ratio": 2.5,
-  "max_rr_ratio": 3.0,
+  "fixed_sl_usd": 30.0,
+  "fixed_tp_usd": 36.5,
+  "rr_ratio": 1.21,
+  "max_rr_ratio": 1.3,
 
   "breakeven_enabled": true,
-  "breakeven_trigger_usd": 35.0,
+  "breakeven_trigger_usd": 30.0,
   "margin_safety_factor": 0.75,
 
   "max_concurrent_trades": 1,
@@ -26,13 +28,17 @@
   "pyramid_sl_usd": 1.5,
   "pyramid_max_risk_usd": 50,
 
-  "max_trades_day": 2,
+  "max_trades_day": 1,
   "max_losing_trades_day": 2,
   "loss_streak_cooldown_min": 120,
   "same_setup_cooldown_min": 30,
   "min_reentry_wait_min": 30,
   "consecutive_sl_guard": 1,
   "sl_direction_cooldown_min": 120,
+
+  "post_win_day_lock": true,
+  "post_win_candle_lock": true,
+  "post_win_session_lock": true,
 
   "exhaustion_atr_mult": 1.8,
 
@@ -54,7 +60,7 @@
     "Asian": 6
   },
 
-  "max_trades_london": 2,
+  "max_trades_london": 1,
   "max_trades_us": 1,
   "max_trades_asian": 0,
   "max_losing_trades_session": 1,
@@ -62,9 +68,6 @@
   "h1_trend_filter_enabled": true,
   "h1_ema_period": 21,
   "require_candle_close": true,
-
-  "post_win_candle_lock": true,
-  "post_win_session_lock": true,
 
   "news_filter_enabled": true,
   "news_block_before_min": 45,
@@ -89,8 +92,6 @@
 
   "sl_pct": 0.0035,
   "tp_pct": 0.0087,
-  "fixed_sl_usd": 35.0,
-  "fixed_tp_usd": null,
 
   "margin_retry_safety_factor": 0.4,
   "auto_scale_on_margin_reject": true,
@@ -104,7 +105,7 @@
 
   "trailing_stop_atr_mult": 0,
 
-  "version": "5.1-FIXED",
+  "version": "5.1-FIXED-v2",
   "instrument": "XAU_USD",
   "instrument_display": "XAU/USD",
   "timeframe": "M15",
