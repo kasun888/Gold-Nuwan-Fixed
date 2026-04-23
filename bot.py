@@ -143,11 +143,11 @@ def validate_settings(settings: dict) -> dict:
     # v4.4 — Three sessions active
     # FIXED defaults — tuned for 60% win rate target
     settings.setdefault("spread_limits",             {"Asian": 999, "London": 120, "US": 120})
-    settings.setdefault("max_trades_day",            2)             # FIXED: was 999, now 2 max per day
+    settings.setdefault("max_trades_day",            1)             # v2: 1 trade per day max             # FIXED: was 999, now 2 max per day
     settings.setdefault("max_losing_trades_day",     2)             # FIXED: was 999, now stop after 2 losses
-    settings.setdefault("sl_mode",                   "atr_based")
-    settings.setdefault("tp_mode",                   "rr_multiple")
-    settings.setdefault("rr_ratio",                  2.5)           # FIXED: was 2.65 default but settings had 1.5 — now 2.5
+    settings.setdefault("sl_mode",                   "fixed_usd")    # v2: fixed pip SL
+    settings.setdefault("tp_mode",                   "fixed_usd")    # v2: fixed pip TP
+    settings.setdefault("rr_ratio",                  1.21)   # v2: 36.5/30 = 1.216           # FIXED: was 2.65 default but settings had 1.5 — now 2.5
     settings.setdefault("max_rr_ratio",              3.0)
     settings.setdefault("sl_min_atr_mult",           1.0)           # FIXED: was 0.8 — raise floor to full ATR
     settings.setdefault("h1_trend_filter_enabled",   True)
@@ -160,9 +160,9 @@ def validate_settings(settings: dict) -> dict:
     settings.setdefault("account_balance_override",  0)
     settings.setdefault("enabled",                   True)
     settings.setdefault("atr_sl_multiplier",         1.5)           # FIXED: was 1.0 — gold needs wider SL
-    settings.setdefault("sl_min_usd",                35.0)          # FIXED: was 15.0 — $25 was too tight
-    settings.setdefault("sl_max_usd",                50.0)          # FIXED: was 40.0
-    settings.setdefault("fixed_sl_usd",              35.0)          # FIXED: was 20.0
+    settings.setdefault("sl_min_usd",                30.0)    # v2: fixed at 3000 pips          # FIXED: was 15.0 — $25 was too tight
+    settings.setdefault("sl_max_usd",                30.0)    # v2: fixed at 3000 pips          # FIXED: was 40.0
+    settings.setdefault("fixed_sl_usd",              30.0)    # v2: 3000 pips = $30          # FIXED: was 20.0
     settings.setdefault("breakeven_trigger_usd",     35.0)          # FIXED: was 15.0 — trigger BE at 1x SL
     settings.setdefault("sl_pct",                   0.0025)
     settings.setdefault("tp_pct",                   0.0075)
@@ -175,7 +175,7 @@ def validate_settings(settings: dict) -> dict:
     settings.setdefault("friday_cutoff_minute_sgt",  0)     # Friday cutoff kept at 23:00 SGT
     settings.setdefault("news_lookahead_min",         120)
     settings.setdefault("news_medium_penalty_score",  -1)
-    settings.setdefault("fixed_tp_usd",              None)
+    settings.setdefault("fixed_tp_usd",              36.5)    # v2: 3650 pips = $36.50
     settings.setdefault("loss_streak_cooldown_min",   120)   # FIXED: was 0 — now 2h cooldown after 2 losses
     settings.setdefault("max_concurrent_trades",      1)
     settings.setdefault("max_trades_london",          2)     # FIXED: was 999 — max 2 London trades
@@ -202,6 +202,7 @@ def validate_settings(settings: dict) -> dict:
     # v4.2 — same-setup re-entry cooldown (microsecond bug fixed in v4.0)
     settings.setdefault("same_setup_cooldown_min",     30)    # FIXED: was 15 — 30min between same setups
     # v2.0 — Win candle lock
+    settings.setdefault("post_win_day_lock",          True)    # v2: NEW — block all trades for rest of day after a win
     settings.setdefault("post_win_candle_lock",        True)
     settings.setdefault("post_win_session_lock",       True)
 
@@ -521,7 +522,7 @@ def compute_sl_usd(levels: dict, settings: dict) -> float:
         log.warning("atr_based SL: ATR not available — falling back to pct_based")
 
     if sl_mode == "fixed_usd":
-        return float(settings.get("fixed_sl_usd", 20.0))
+        return float(settings.get("fixed_sl_usd", 30.0))  # v2: 3000 pips = $30
 
     # pct_based (default fallback)
     entry  = levels.get("entry") or levels.get("current_price", 0)
@@ -538,20 +539,31 @@ def compute_sl_usd(levels: dict, settings: dict) -> float:
 def compute_tp_usd(levels: dict, sl_usd: float, settings: dict) -> float:
     """Derive TP distance in USD.
 
-    v4.6 priority order:
-      1. Structural TP from signal engine (tp_usd_rec) if it satisfies min RR
+    v2-FIXED priority order:
+      1. fixed_usd override when tp_mode == "fixed_usd"  ← NOW FIRST PRIORITY
+         This ensures SL=3000 pips / TP=3500-3800 pips is always respected.
+      2. Structural TP from signal engine (tp_usd_rec) if satisfies min RR
          AND does not exceed max_rr_ratio cap.
-         This prevents the 1:5 TP bug where structural levels place TP far
-         beyond the intended RR range.
-      2. fixed_usd override when tp_mode == "fixed_usd".
-      3. Fallback: sl_usd x rr_ratio (min RR multiple).
+      3. Fallback: sl_usd x rr_ratio.
     All results capped at sl_usd x max_rr_ratio.
     """
-    min_rr  = float(settings.get("rr_ratio", 2.5))
-    max_rr  = float(settings.get("max_rr_ratio", 3.0))
-    tp_ceil = round(sl_usd * max_rr, 2)   # hard ceiling regardless of source
+    min_rr  = float(settings.get("rr_ratio", 1.21))
+    max_rr  = float(settings.get("max_rr_ratio", 1.3))
+    tp_ceil = round(sl_usd * max_rr, 2)
 
-    # 1. Structural TP from signals.py (R1/S1 level)
+    # 1. Fixed USD override — FIRST in v2-FIXED (was #2 before)
+    tp_mode = str(settings.get("tp_mode", "fixed_usd")).lower()
+    if tp_mode == "fixed_usd":
+        fixed = settings.get("fixed_tp_usd")
+        if fixed is not None:
+            try:
+                v = float(fixed)
+                if v > 0:
+                    return round(v, 2)   # v2: no cap — fixed is the rule
+            except (TypeError, ValueError):
+                pass
+
+    # 2. Structural TP from signals.py (R1/S1 level)
     structural_tp = levels.get("tp_usd_rec")
     if structural_tp is not None:
         try:
@@ -561,19 +573,7 @@ def compute_tp_usd(levels: dict, sl_usd: float, settings: dict) -> float:
         except (TypeError, ValueError):
             pass
 
-    # 2. Fixed USD override
-    tp_mode = str(settings.get("tp_mode", "rr_multiple")).lower()
-    if tp_mode == "fixed_usd":
-        fixed = settings.get("fixed_tp_usd")
-        if fixed is not None:
-            try:
-                v = float(fixed)
-                if v > 0:
-                    return round(min(v, tp_ceil), 2)
-            except (TypeError, ValueError):
-                pass
-
-    # 3. RR multiple fallback (already within cap since min_rr <= max_rr)
+    # 3. RR multiple fallback
     return round(sl_usd * min_rr, 2)
 
 
@@ -1499,6 +1499,50 @@ def _guard_phase(db, run_id, settings, alert, trader, history, now_sgt, today, d
                     extra={"run_id": run_id},
                 )
     # ── END POST-WIN SESSION LOCK ──────────────────────────────────────────────
+
+    # ── POST-WIN DAY LOCK (v2-FIXED) ──────────────────────────────────────────
+    # After ANY winning trade (TP hit), block ALL new entries for the rest of
+    # the trading day. One win per day — done. Resets at trading_day_start_hour_sgt.
+    #
+    # This is stronger than post_win_session_lock which only blocks the current
+    # session. This blocks the ENTIRE remaining day regardless of session.
+    if settings.get("post_win_day_lock", True) and open_count == 0:
+        _locked_sess, _locked_day = get_win_session()
+        if _locked_day and _locked_day == today:
+            _lock_msg = (
+                f"🏆 Post-win DAY lock active — trading done for today ({today}).\n"
+                f"A winning trade was already closed today. No more entries until "
+                f"{int(settings.get('trading_day_start_hour_sgt', 8)):02d}:00 SGT tomorrow.\n"
+                f"One win per day — protecting the profit."
+            )
+            send_once_per_state(
+                alert, ops, "post_win_day_lock_state",
+                f"win_day:{_locked_day}",
+                _lock_msg,
+            )
+            log_event(
+                "POST_WIN_DAY_LOCK",
+                f"Entry blocked — win already taken today ({_locked_day}). Done for the day.",
+                run_id=run_id,
+            )
+            update_runtime_state(
+                last_cycle_finished=now_sgt.strftime("%Y-%m-%d %H:%M:%S"),
+                status="SKIPPED_POST_WIN_DAY_LOCK",
+            )
+            db.finish_cycle(
+                run_id, status="SKIPPED",
+                summary={"stage": "post_win_day_lock", "win_day": _locked_day},
+            )
+            return None
+        elif _locked_day and _locked_day != today:
+            # New trading day — clear the day lock
+            clear_win_session()
+            log.info(
+                "Post-win DAY lock CLEARED | was=%s | now=%s | new day — entries re-enabled",
+                _locked_day, today,
+                extra={"run_id": run_id},
+            )
+    # ── END POST-WIN DAY LOCK ──────────────────────────────────────────────────
 
     # ── v2.0 WIN CANDLE LOCK ───────────────────────────────────────────────────
     # After a TP win, block new entries until the winning M15 candle has fully
