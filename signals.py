@@ -340,31 +340,41 @@ class SignalEngine:
         # ── Position size — FIXED: only score >= 5 gets a position ───────────
         position_usd = score_to_position_usd(score, settings)
 
-        # ── SL calculation — FIXED: purely ATR-based, multiplier 1.5 ─────────
-        # Old code used CPR structural SL (often only $5-10) then fell back to
-        # 0.25% fixed. Both were too tight. ATR-based is the correct approach.
+        # ── SL calculation — v2-FIXED: 3000 pips = $30.00 fixed ──────────────
+        # XAU/USD: 1 pip = $0.01, so 3000 pips = $30.00 per unit.
+        # Uses fixed_usd mode — SL is constant regardless of ATR.
         entry    = current_close
-        atr_mult = float(settings.get("atr_sl_multiplier", 1.5)) if settings else 1.5
-        sl_min   = float(settings.get("sl_min_usd", 35.0)) if settings else 35.0
-        sl_max   = float(settings.get("sl_max_usd", 50.0)) if settings else 50.0
-        raw_sl   = atr_val * atr_mult
-        sl_usd_rec = round(max(sl_min, min(sl_max, raw_sl)), 2)
-        sl_source  = "atr_based"
+        _sl_mode = str((settings or {}).get("sl_mode", "fixed_usd")).lower()
+        if _sl_mode == "fixed_usd":
+            sl_usd_rec = float((settings or {}).get("fixed_sl_usd", 30.0))
+            sl_source  = "fixed_3000pips"
+        else:
+            atr_mult   = float((settings or {}).get("atr_sl_multiplier", 1.5))
+            sl_min     = float((settings or {}).get("sl_min_usd", 30.0))
+            sl_max     = float((settings or {}).get("sl_max_usd", 30.0))
+            raw_sl     = atr_val * atr_mult
+            sl_usd_rec = round(max(sl_min, min(sl_max, raw_sl)), 2)
+            sl_source  = "atr_based"
         sl_pct_used = round(sl_usd_rec / entry * 100, 4)
 
-        # ── TP calculation — FIXED: always SL × rr_ratio (2.5x default) ──────
-        # Old code used R1/S1 structural levels which sometimes gave <$30 TP.
-        # Now TP is always derived from SL so R:R is guaranteed.
-        rr_ratio   = float(settings.get("rr_ratio", 2.5)) if settings else 2.5
-        max_rr     = float(settings.get("max_rr_ratio", 3.0)) if settings else 3.0
-        tp_usd_rec = round(sl_usd_rec * rr_ratio, 2)
-        tp_usd_rec = round(min(tp_usd_rec, sl_usd_rec * max_rr), 2)
-        tp_source  = "rr_multiple"
+        # ── TP calculation — v2-FIXED: 3500-3800 pips = $36.50 fixed ─────────
+        # Midpoint of 3500–3800 pip range = 3650 pips = $36.50.
+        # Uses fixed_usd mode for consistent TP every trade.
+        _tp_mode = str((settings or {}).get("tp_mode", "fixed_usd")).lower()
+        if _tp_mode == "fixed_usd":
+            _fixed_tp  = (settings or {}).get("fixed_tp_usd", 36.5)
+            tp_usd_rec = float(_fixed_tp) if _fixed_tp else round(sl_usd_rec * 1.21, 2)
+            tp_source  = "fixed_3650pips"
+        else:
+            rr_ratio   = float((settings or {}).get("rr_ratio", 1.21))
+            max_rr     = float((settings or {}).get("max_rr_ratio", 1.3))
+            tp_usd_rec = round(min(sl_usd_rec * rr_ratio, sl_usd_rec * max_rr), 2)
+            tp_source  = "rr_multiple"
         tp_pct_used = round(tp_usd_rec / entry * 100, 4)
 
         # ── R:R guard ─────────────────────────────────────────────────────────
         actual_rr   = round(tp_usd_rec / sl_usd_rec, 2) if sl_usd_rec > 0 else 0
-        _min_rr_sig = float((settings or {}).get("rr_ratio", 2.5))
+        _min_rr_sig = float((settings or {}).get("rr_ratio", 1.21))
         rr_skip     = actual_rr < _min_rr_sig
 
         blocker_reasons = []
