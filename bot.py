@@ -108,7 +108,7 @@ def _build_signal_checks(score: int, direction: str, rr_ratio: float | None = No
                          cooldown_ok: bool = True):
     mandatory_checks = [
         (f"Score >= {(settings or {}).get('signal_threshold', 4)}", score >= int((settings or {}).get('signal_threshold', 4)) and direction != "NONE", f"{score}/6"),
-        (f"RR >= {settings.get('rr_ratio', 2.65):.2f}", None if rr_ratio is None else rr_ratio >= float(settings.get('rr_ratio', 2.65)), "n/a" if rr_ratio is None else f"{rr_ratio:.2f}"),
+        (f"RR >= {settings.get('rr_ratio', 1.21):.2f}", None if rr_ratio is None else rr_ratio >= float(settings.get('rr_ratio', 1.21)), "n/a" if rr_ratio is None else f"{rr_ratio:.2f}"),
     ]
     quality_checks = [
         ("TP >= 0.5%", None if tp_pct is None else tp_pct >= 0.5, "n/a" if tp_pct is None else f"{tp_pct:.2f}%"),
@@ -531,7 +531,7 @@ def compute_sl_usd(levels: dict, settings: dict) -> float:
         sl_usd = round(entry * sl_pct, 2)
         log.debug("Pct SL: %.2f × %.4f%% = $%.2f", entry, sl_pct * 100, sl_usd)
         return sl_usd
-    fallback = float(settings.get("fixed_sl_usd", 20.0))
+    fallback = float(settings.get("fixed_sl_usd", 30.0))  # BUG1-FIXED: was 20.0
     log.warning("pct_based SL: no valid entry price — fallback $%.2f", fallback)
     return fallback
 
@@ -586,7 +586,7 @@ def derive_rr_ratio(levels: dict, sl_usd: float, tp_usd: float, settings: dict) 
         pass
     if sl_usd > 0 and tp_usd > 0:
         return round(tp_usd / sl_usd, 2)
-    return float(settings.get("rr_ratio", 2.5))
+    return float(settings.get("rr_ratio", 1.21))  # BUG3-FIXED: was 2.5
 
 
 # Note: compute_atr_sl_usd alias removed — no external callers exist in this codebase
@@ -1455,6 +1455,127 @@ def _guard_phase(db, run_id, settings, alert, trader, history, now_sgt, today, d
     # This addresses the pattern where a winning trade is followed by losing
     # trades in the same session — "banking the win" by sitting out the rest
     # of the session.
+    if settings.get("post_win_day_lock", True) and open_count == 0:
+        _locked_sess, _locked_day = get_win_session()
+        if _locked_day and _locked_day == today:
+            _lock_msg = (
+                f"🏆 Post-win DAY lock active — trading done for today ({today}).\n"
+                f"A winning trade was already closed today. No more entries until "
+                f"{int(settings.get('trading_day_start_hour_sgt', 8)):02d}:00 SGT tomorrow.\n"
+                f"One win per day — protecting the profit."
+            )
+            send_once_per_state(
+                alert, ops, "post_win_day_lock_state",
+                f"win_day:{_locked_day}",
+                _lock_msg,
+            )
+            log_event(
+                "POST_WIN_DAY_LOCK",
+                f"Entry blocked — win already taken today ({_locked_day}). Done for the day.",
+                run_id=run_id,
+            )
+            update_runtime_state(
+                last_cycle_finished=now_sgt.strftime("%Y-%m-%d %H:%M:%S"),
+                status="SKIPPED_POST_WIN_DAY_LOCK",
+            )
+            db.finish_cycle(
+                run_id, status="SKIPPED",
+                summary={"stage": "post_win_day_lock", "win_day": _locked_day},
+            )
+            return None
+        elif _locked_day and _locked_day != today:
+            # New trading day — clear the day lock
+            clear_win_session()
+            log.info(
+                "Post-win DAY lock CLEARED | was=%s | now=%s | new day — entries re-enabled",
+                _locked_day, today,
+                extra={"run_id": run_id},
+            )
+    if settings.get("post_win_day_lock", True) and open_count == 0:
+        _locked_sess, _locked_day = get_win_session()
+        if _locked_day and _locked_day == today:
+            _lock_msg = (
+                f"🏆 Post-win DAY lock active — trading done for today ({today}).\n"
+                f"A winning trade was already closed today. No more entries until "
+                f"{int(settings.get('trading_day_start_hour_sgt', 8)):02d}:00 SGT tomorrow.\n"
+                f"One win per day — protecting the profit."
+            )
+            send_once_per_state(
+                alert, ops, "post_win_day_lock_state",
+                f"win_day:{_locked_day}",
+                _lock_msg,
+            )
+            log_event(
+                "POST_WIN_DAY_LOCK",
+                f"Entry blocked — win already taken today ({_locked_day}). Done for the day.",
+                run_id=run_id,
+            )
+            update_runtime_state(
+                last_cycle_finished=now_sgt.strftime("%Y-%m-%d %H:%M:%S"),
+                status="SKIPPED_POST_WIN_DAY_LOCK",
+            )
+            db.finish_cycle(
+                run_id, status="SKIPPED",
+                summary={"stage": "post_win_day_lock", "win_day": _locked_day},
+            )
+            return None
+        elif _locked_day and _locked_day != today:
+            # New trading day — clear the day lock
+            clear_win_session()
+            log.info(
+                "Post-win DAY lock CLEARED | was=%s | now=%s | new day — entries re-enabled",
+                _locked_day, today,
+                extra={"run_id": run_id},
+            )
+    # ── END POST-WIN DAY LOCK ──────────────────────────────────────────────────
+
+    # ── END POST-WIN DAY LOCK ──────────────────────────────────────────────────
+
+    if settings.get("post_win_session_lock", True) and open_count == 0:
+        _locked_sess, _locked_day = get_win_session()
+        if _locked_sess and _locked_day:
+            _cur_macro  = macro          # already resolved above by get_session()
+            _cur_day    = today
+            if _cur_macro == _locked_sess and _cur_day == _locked_day:
+                # Still in the same session as the win — block entry.
+                _lock_msg = (
+                    f"🏆 Post-win SESSION lock active — trading paused for rest of {_locked_sess} session.\n"
+                    f"A winning trade was closed this {_locked_sess} session ({_locked_day}).\n"
+                    f"New entries will resume at the start of the next session."
+                )
+                send_once_per_state(
+                    alert, ops, "post_win_session_lock_state",
+                    f"win_sess:{_locked_sess}:{_locked_day}",
+                    _lock_msg,
+                )
+                log_event(
+                    "POST_WIN_SESSION_LOCK",
+                    f"Entry blocked — win already taken in {_locked_sess} session ({_locked_day}).",
+                    run_id=run_id,
+                )
+                update_runtime_state(
+                    last_cycle_finished=now_sgt.strftime("%Y-%m-%d %H:%M:%S"),
+                    status="SKIPPED_POST_WIN_SESSION_LOCK",
+                )
+                db.finish_cycle(
+                    run_id, status="SKIPPED",
+                    summary={
+                        "stage":         "post_win_session_lock",
+                        "win_session":   _locked_sess,
+                        "win_day":       _locked_day,
+                    },
+                )
+                return None
+            else:
+                # New session (or new day) — lock is no longer needed, clear it.
+                clear_win_session()
+                log.info(
+                    "Post-win SESSION lock CLEARED | was=%s/%s | now=%s/%s | entries re-enabled",
+                    _locked_sess, _locked_day, _cur_macro, _cur_day,
+                    extra={"run_id": run_id},
+                )
+    # ── END POST-WIN SESSION LOCK ──────────────────────────────────────────────
+
     if settings.get("post_win_session_lock", True) and open_count == 0:
         _locked_sess, _locked_day = get_win_session()
         if _locked_sess and _locked_day:
@@ -1506,43 +1627,6 @@ def _guard_phase(db, run_id, settings, alert, trader, history, now_sgt, today, d
     #
     # This is stronger than post_win_session_lock which only blocks the current
     # session. This blocks the ENTIRE remaining day regardless of session.
-    if settings.get("post_win_day_lock", True) and open_count == 0:
-        _locked_sess, _locked_day = get_win_session()
-        if _locked_day and _locked_day == today:
-            _lock_msg = (
-                f"🏆 Post-win DAY lock active — trading done for today ({today}).\n"
-                f"A winning trade was already closed today. No more entries until "
-                f"{int(settings.get('trading_day_start_hour_sgt', 8)):02d}:00 SGT tomorrow.\n"
-                f"One win per day — protecting the profit."
-            )
-            send_once_per_state(
-                alert, ops, "post_win_day_lock_state",
-                f"win_day:{_locked_day}",
-                _lock_msg,
-            )
-            log_event(
-                "POST_WIN_DAY_LOCK",
-                f"Entry blocked — win already taken today ({_locked_day}). Done for the day.",
-                run_id=run_id,
-            )
-            update_runtime_state(
-                last_cycle_finished=now_sgt.strftime("%Y-%m-%d %H:%M:%S"),
-                status="SKIPPED_POST_WIN_DAY_LOCK",
-            )
-            db.finish_cycle(
-                run_id, status="SKIPPED",
-                summary={"stage": "post_win_day_lock", "win_day": _locked_day},
-            )
-            return None
-        elif _locked_day and _locked_day != today:
-            # New trading day — clear the day lock
-            clear_win_session()
-            log.info(
-                "Post-win DAY lock CLEARED | was=%s | now=%s | new day — entries re-enabled",
-                _locked_day, today,
-                extra={"run_id": run_id},
-            )
-    # ── END POST-WIN DAY LOCK ──────────────────────────────────────────────────
 
     # ── v2.0 WIN CANDLE LOCK ───────────────────────────────────────────────────
     # After a TP win, block new entries until the winning M15 candle has fully
@@ -1764,7 +1848,7 @@ def _signal_phase(db, run_id, settings, alert, trader, history, now_sgt, today, 
     # v4.1: RR gate using the ACTUAL executed SL (not the signal-engine estimate).
     # signals.py validates RR against its own 0.25% fixed SL (~$11-12).
     # bot.py uses ATR-based SL ($15-40) which can be 3x larger, breaking the RR.
-    _min_rr = float(settings.get("rr_ratio", 2.5))
+    _min_rr = float(settings.get("rr_ratio", 1.21))  # BUG4-FIXED: was 2.5
     if rr_ratio < _min_rr:
         _rr_reason = (
             f"Actual R:R {rr_ratio:.2f} < minimum {_min_rr:.1f} "
