@@ -142,7 +142,7 @@ def validate_settings(settings: dict) -> dict:
     # by setdefault — a missing key is treated the same as any other default.
     # v4.4 — Three sessions active
     # FIXED defaults — tuned for 60% win rate target
-    settings.setdefault("spread_limits",             {"Asian": 999, "London": 120, "US": 120})
+    settings.setdefault("spread_limits",             {"Asian": 999, "London": 60, "US": 60})    # FIX BUG3: 60 pips=$0.60 max spread
     settings.setdefault("max_trades_day",            1)             # v2: 1 trade per day max             # FIXED: was 999, now 2 max per day
     settings.setdefault("max_losing_trades_day",     2)             # FIXED: was 999, now stop after 2 losses
     settings.setdefault("sl_mode",                   "fixed_usd")    # v2: fixed pip SL
@@ -180,7 +180,7 @@ def validate_settings(settings: dict) -> dict:
     settings.setdefault("max_concurrent_trades",      1)
     settings.setdefault("max_trades_london",          2)     # FIXED: was 999 — max 2 London trades
     settings.setdefault("max_trades_us",              1)     # FIXED: was 999 — max 1 US trade
-    settings.setdefault("max_spread_pips",            130)   # FIXED: was 150
+    settings.setdefault("max_spread_pips",            60)    # FIX BUG3: was 130 — wide spread at open eats $22/trade on XAU. 60 pips = $0.60 max spread
     settings.setdefault("session_only",               True)
     settings.setdefault("session_thresholds",         {"Asian": 6, "London": 5, "US": 5})  # FIXED: raise thresholds
     settings.setdefault("news_filter_enabled",        True)
@@ -812,6 +812,14 @@ def check_breakeven(history: list, trader, alert, settings: dict):
         if sl_result.get("success"):
             trade["breakeven_moved"] = True
             trade["partial_closed"]  = partial_ok
+            # FIX BUG: ensure macro_session is preserved in the trade record
+            # so that if backfill_pnl later reads this trade, win_session can
+            # be set correctly. Without this, _win_macro = None and lock silently fails.
+            if not trade.get("macro_session"):
+                log.warning(
+                    "check_breakeven: trade %s has no macro_session — win lock may not fire correctly",
+                    trade_id,
+                )
             changed = True
             log.info(
                 "Breakeven set | trade %s | entry=%.2f | unrealized=+$%.2f | partial=%s",
@@ -891,9 +899,12 @@ def backfill_pnl(history: list, trader, alert, settings: dict) -> list:
                     # A positive PnL means this trade just closed as a TP win.
                     # Record the winning candle so _guard_phase() can block
                     # re-entry until the NEXT M15 candle opens.
-                    # We only set the lock if it's not already set for this
-                    # same candle (idempotent — safe if backfill runs twice).
-                    if pnl > 0 and settings.get("post_win_candle_lock", True):
+                    # FIX BUG: Skip lock on partial closes — partial_closed=True
+                    # means 50% was closed at breakeven, not a full TP win.
+                    # Setting the lock on a partial was blocking legitimate
+                    # new entries while a position was still running.
+                    _is_partial_candle = trade.get("partial_closed", False)
+                    if pnl > 0 and settings.get("post_win_candle_lock", True) and not _is_partial_candle:
                         current_candle = get_m15_candle_floor(now_sgt)
                         existing_lock  = get_last_win_candle()
                         if existing_lock != current_candle:
@@ -909,8 +920,14 @@ def backfill_pnl(history: list, trader, alert, settings: dict) -> list:
                             )
 
                     # ── v2.1 POST-WIN SESSION LOCK ─────────────────────────
-                    # Also lock out trading for the rest of this macro session.
-                    if pnl > 0 and settings.get("post_win_session_lock", True):
+                    # FIX BUG: Only set win_session on FULL trade close, NOT on
+                    # partial closes. Partial closes (breakeven exit) have
+                    # trade.get("partial_closed") == True and the trade is still
+                    # open (remaining units). Setting the win lock on a partial
+                    # close was causing the lock to fire too early and also
+                    # failing silently when macro_session was None on the partial record.
+                    _is_partial = trade.get("partial_closed", False)
+                    if pnl > 0 and settings.get("post_win_session_lock", True) and not _is_partial:
                         _win_macro = trade.get("macro_session") or trade.get("session")
                         _win_day   = trade.get("trading_day", now_sgt.strftime("%Y-%m-%d"))
                         _existing_win_sess, _existing_win_day = get_win_session()
