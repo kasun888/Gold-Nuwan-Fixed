@@ -346,12 +346,12 @@ class SignalEngine:
         entry    = current_close
         _sl_mode = str((settings or {}).get("sl_mode", "fixed_usd")).lower()
         if _sl_mode == "fixed_usd":
-            sl_usd_rec = float((settings or {}).get("fixed_sl_usd", 30.0))
+            sl_usd_rec = float((settings or {}).get('fixed_sl_usd', 17.0))
             sl_source  = "fixed_3000pips"
         else:
             atr_mult   = float((settings or {}).get("atr_sl_multiplier", 1.5))
-            sl_min     = float((settings or {}).get("sl_min_usd", 30.0))
-            sl_max     = float((settings or {}).get("sl_max_usd", 30.0))
+            sl_min     = float((settings or {}).get('sl_min_usd', 17.0))
+            sl_max     = float((settings or {}).get('sl_max_usd', 17.0))
             raw_sl     = atr_val * atr_mult
             sl_usd_rec = round(max(sl_min, min(sl_max, raw_sl)), 2)
             sl_source  = "atr_based"

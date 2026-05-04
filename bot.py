@@ -147,7 +147,7 @@ def validate_settings(settings: dict) -> dict:
     settings.setdefault("max_losing_trades_day",     2)             # FIXED: was 999, now stop after 2 losses
     settings.setdefault("sl_mode",                   "fixed_usd")    # v2: fixed pip SL
     settings.setdefault("tp_mode",                   "fixed_usd")    # v2: fixed pip TP
-    settings.setdefault("rr_ratio",                  1.21)   # v2: 36.5/30 = 1.216           # FIXED: was 2.65 default but settings had 1.5 — now 2.5
+    settings.setdefault("rr_ratio",                  2.15)    # 36.5/17.0   # v2: 36.5/30 = 1.216           # FIXED: was 2.65 default but settings had 1.5 — now 2.5
     settings.setdefault("max_rr_ratio",              3.0)
     settings.setdefault("sl_min_atr_mult",           1.0)           # FIXED: was 0.8 — raise floor to full ATR
     settings.setdefault("h1_trend_filter_enabled",   True)
@@ -160,9 +160,9 @@ def validate_settings(settings: dict) -> dict:
     settings.setdefault("account_balance_override",  0)
     settings.setdefault("enabled",                   True)
     settings.setdefault("atr_sl_multiplier",         1.5)           # FIXED: was 1.0 — gold needs wider SL
-    settings.setdefault("sl_min_usd",                30.0)    # v2: fixed at 3000 pips          # FIXED: was 15.0 — $25 was too tight
-    settings.setdefault("sl_max_usd",                30.0)    # v2: fixed at 3000 pips          # FIXED: was 40.0
-    settings.setdefault("fixed_sl_usd",              30.0)    # v2: 3000 pips = $30          # FIXED: was 20.0
+    settings.setdefault("sl_min_usd",                17.0)    # 1700 pips    # v2: fixed at 3000 pips          # FIXED: was 15.0 — $25 was too tight
+    settings.setdefault("sl_max_usd",                17.0)    # 1700 pips    # v2: fixed at 3000 pips          # FIXED: was 40.0
+    settings.setdefault("fixed_sl_usd",              17.0)    # 1700 pips    # v2: 3000 pips = $30          # FIXED: was 20.0
     settings.setdefault("breakeven_trigger_usd",     35.0)          # FIXED: was 15.0 — trigger BE at 1x SL
     settings.setdefault("sl_pct",                   0.0025)
     settings.setdefault("tp_pct",                   0.0075)
@@ -586,7 +586,7 @@ def derive_rr_ratio(levels: dict, sl_usd: float, tp_usd: float, settings: dict) 
         pass
     if sl_usd > 0 and tp_usd > 0:
         return round(tp_usd / sl_usd, 2)
-    return float(settings.get("rr_ratio", 1.21))  # BUG3-FIXED: was 2.5
+    return float(settings.get("rr_ratio", 2.15))  # BUG3-FIXED: was 2.5
 
 
 # Note: compute_atr_sl_usd alias removed — no external callers exist in this codebase
@@ -1865,7 +1865,7 @@ def _signal_phase(db, run_id, settings, alert, trader, history, now_sgt, today, 
     # v4.1: RR gate using the ACTUAL executed SL (not the signal-engine estimate).
     # signals.py validates RR against its own 0.25% fixed SL (~$11-12).
     # bot.py uses ATR-based SL ($15-40) which can be 3x larger, breaking the RR.
-    _min_rr = float(settings.get("rr_ratio", 1.21))  # BUG4-FIXED: was 2.5
+    _min_rr = float(settings.get("rr_ratio", 2.15))  # BUG4-FIXED: was 2.5
     if rr_ratio < _min_rr:
         _rr_reason = (
             f"Actual R:R {rr_ratio:.2f} < minimum {_min_rr:.1f} "
