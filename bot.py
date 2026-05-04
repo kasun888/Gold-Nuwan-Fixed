@@ -1831,8 +1831,21 @@ def _signal_phase(db, run_id, settings, alert, trader, history, now_sgt, today, 
                     f"Same-setup cooldown active: '{_current_setup}' last entered "
                     f"{_mins_ago}min ago (cooldown={_same_setup_cooldown}min)"
                 )
-                _send_signal_update("BLOCKED", _reason,
-                                    {"session_ok": True, "news_ok": True, "open_trade_ok": True})
+                # FIX SPAM: use send_once_per_state keyed on setup+day so this
+                # message fires ONCE per cooldown window, not every 5-min cycle.
+                # The mins_ago counter was changing each cycle, bypassing _send_signal_update dedup.
+                _cooldown_key = f"same_setup_cooldown:{_current_setup}:{_past_ts.strftime('%Y-%m-%d %H:%M')}"
+                send_once_per_state(alert, ops, "same_setup_cooldown_state", _cooldown_key, 
+                    msg_signal_update(
+                        banner=banner, session=session, direction=direction,
+                        score=score, position_usd=position_usd, cpr_width_pct=cpr_w,
+                        detail_lines=details.split(" | "), news_penalty=news_penalty,
+                        raw_score=raw_score, decision="BLOCKED", reason=_reason,
+                        cycle_minutes=int(settings.get("cycle_minutes", 5)),
+                        **_signal_payload(settings=settings, score=score, direction=direction,
+                                          session_ok=True, news_ok=True, open_trade_ok=True),
+                    )
+                )
                 log.info("Same-setup cooldown blocking entry: %s", _reason, extra={"run_id": run_id})
                 update_runtime_state(
                     last_cycle_finished=now_sgt.strftime("%Y-%m-%d %H:%M:%S"),
@@ -1905,9 +1918,20 @@ def _signal_phase(db, run_id, settings, alert, trader, history, now_sgt, today, 
                 f"Direction cooldown active — {direction} blocked for {_remaining}min more "
                 f"(after {_sl_streak} consecutive SL streak)"
             )
-            _send_signal_update("BLOCKED", _cooldown_reason,
-                                {"rr_ratio": rr_ratio, "tp_pct": tp_pct,
-                                 "session_ok": True, "news_ok": True, "open_trade_ok": True})
+            # FIX SPAM: key on block_until timestamp so message sends once per cooldown window
+            _dir_cooldown_key = f"dir_cooldown:{direction}:{_dir_block_until.strftime('%Y-%m-%d %H:%M')}"
+            send_once_per_state(alert, ops, "direction_cooldown_state", _dir_cooldown_key,
+                msg_signal_update(
+                    banner=banner, session=session, direction=direction,
+                    score=score, position_usd=position_usd, cpr_width_pct=cpr_w,
+                    detail_lines=details.split(" | "), news_penalty=news_penalty,
+                    raw_score=raw_score, decision="BLOCKED", reason=_cooldown_reason,
+                    cycle_minutes=int(settings.get("cycle_minutes", 5)),
+                    **_signal_payload(settings=settings, score=score, direction=direction,
+                                      rr_ratio=rr_ratio, tp_pct=tp_pct,
+                                      session_ok=True, news_ok=True, open_trade_ok=True),
+                )
+            )
             log.info("Direction time-block active: %s", _cooldown_reason, extra={"run_id": run_id})
             update_runtime_state(last_cycle_finished=now_sgt.strftime("%Y-%m-%d %H:%M:%S"),
                                  status="SKIPPED_DIRECTION_COOLDOWN", reason=_cooldown_reason)
