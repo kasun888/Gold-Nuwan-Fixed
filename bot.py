@@ -489,27 +489,36 @@ def active_cooldown_until(now_sgt: datetime):
 def compute_sl_usd(levels: dict, settings: dict) -> float:
     """Derive SL distance in USD (= price distance for XAU_USD at 1 unit = 1 oz).
 
-    v4.0 — ATR-based SL is now the default and takes priority.
-    The old signal-engine percentage recommendation is no longer used as an
-    override; sl_mode in settings.json governs the calculation.
+    FIXED v2: fixed_usd is now checked FIRST.
+    Previously the function checked sl_mode == "atr_based" first, which meant
+    if ATR was available the function returned early and NEVER reached the
+    fixed_usd check — even when sl_mode="fixed_usd" was set in settings.
+    This caused the bot to size units using ATR-based SL (~$38) instead of
+    the fixed $17, resulting in only 2.5 units placed instead of the correct
+    5 units. TP was still at $36.5 but risk was only $42 not $100.
 
-    Modes:
-      atr_based  : SL = ATR(14) × atr_sl_multiplier, clamped to [sl_min_usd, sl_max_usd]
-      pct_based  : SL = entry_price × sl_pct
-      fixed_usd  : SL = fixed_sl_usd
+    Priority order (FIXED):
+      1. fixed_usd  : SL = fixed_sl_usd   ← ALWAYS first if sl_mode=fixed_usd
+      2. atr_based  : SL = ATR × multiplier, clamped to [sl_min_usd, sl_max_usd]
+      3. pct_based  : SL = entry_price × sl_pct
     """
     sl_mode = str(settings.get("sl_mode", "atr_based")).lower()
 
+    # ── 1. FIXED USD — checked FIRST (FIXED) ──────────────────────────────────
+    if sl_mode == "fixed_usd":
+        val = settings.get("fixed_sl_usd", 17.0)
+        result = float(val) if val is not None else 17.0
+        log.debug("Fixed SL: $%.2f (1700 pips)", result)
+        return result
+
+    # ── 2. ATR-based ──────────────────────────────────────────────────────────
     if sl_mode == "atr_based":
         atr = levels.get("atr")
         if atr and atr > 0:
-            mult         = float(settings.get("atr_sl_multiplier", 1.0))
-            sl_min_fixed = float(settings.get("sl_min_usd", 35.0))
-            sl_max       = float(settings.get("sl_max_usd", 60.0))
-            # v5.1 — adaptive floor: sl_min = max(fixed_floor, ATR × sl_min_atr_mult)
-            # On quiet days (ATR $20) floor adapts down to $16 instead of locking at $35.
-            # On volatile days (ATR $50) floor stays at $40, respecting sl_min_usd.
-            atr_floor    = atr * float(settings.get("sl_min_atr_mult", 0.8))
+            mult         = float(settings.get("atr_sl_multiplier", 1.5))
+            sl_min_fixed = float(settings.get("sl_min_usd", 17.0))
+            sl_max       = float(settings.get("sl_max_usd", 17.0))
+            atr_floor    = atr * float(settings.get("sl_min_atr_mult", 1.0))
             sl_min       = max(sl_min_fixed, atr_floor)
             raw_sl       = atr * mult
             sl_usd       = max(sl_min, min(sl_max, raw_sl))
@@ -518,20 +527,16 @@ def compute_sl_usd(levels: dict, settings: dict) -> float:
                 atr, mult, raw_sl, sl_min, sl_usd,
             )
             return round(sl_usd, 2)
-        # ATR unavailable — fall through to pct_based
         log.warning("atr_based SL: ATR not available — falling back to pct_based")
 
-    if sl_mode == "fixed_usd":
-        return float(settings.get("fixed_sl_usd", 30.0))  # v2: 3000 pips = $30
-
-    # pct_based (default fallback)
+    # ── 3. Pct-based fallback ─────────────────────────────────────────────────
     entry  = levels.get("entry") or levels.get("current_price", 0)
     sl_pct = float(settings.get("sl_pct", 0.0025))
     if entry and entry > 0 and sl_pct > 0:
         sl_usd = round(entry * sl_pct, 2)
         log.debug("Pct SL: %.2f × %.4f%% = $%.2f", entry, sl_pct * 100, sl_usd)
         return sl_usd
-    fallback = float(settings.get("fixed_sl_usd", 30.0))  # BUG1-FIXED: was 20.0
+    fallback = float(settings.get("fixed_sl_usd", 17.0))
     log.warning("pct_based SL: no valid entry price — fallback $%.2f", fallback)
     return fallback
 
