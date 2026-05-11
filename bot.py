@@ -155,8 +155,8 @@ def validate_settings(settings: dict) -> dict:
     settings.setdefault("require_candle_close",      True)
     settings.setdefault("sl_direction_cooldown_min", 120)           # FIXED: was 60 — 2h cooldown after direction SL streak
     settings.setdefault("signal_threshold",          5)             # FIXED: was 4 — require score 5+ for any trade
-    settings.setdefault("position_full_usd",         100)
-    settings.setdefault("position_partial_usd",      66)
+    settings.setdefault("position_full_usd",         50)
+    settings.setdefault("position_partial_usd",      50)
     settings.setdefault("account_balance_override",  0)
     settings.setdefault("enabled",                   True)
     settings.setdefault("atr_sl_multiplier",         1.5)           # FIXED: was 1.0 — gold needs wider SL
