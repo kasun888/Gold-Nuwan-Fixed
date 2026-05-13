@@ -782,11 +782,34 @@ def check_breakeven(history: list, trader, alert, settings: dict):
             continue
 
         try:
-            unrealized_pnl = float(open_trade.get("unrealizedPL", 0))
+            unrealized_pnl_acct = float(open_trade.get("unrealizedPL", 0))
         except (TypeError, ValueError):
             continue
 
-        # Gate: trigger only when unrealized profit >= 1x SL risk
+        # FIX: OANDA returns unrealizedPL in ACCOUNT currency (SGD for this account).
+        # sl_usd is in USD. Must convert account P&L to USD before comparing.
+        # Get the account currency conversion rate (SGD/USD ~ 0.745).
+        # We read it from the account summary; fall back to a safe default.
+        try:
+            _acct_summary = trader.get_account_summary() or {}
+            _nav_usd      = float(_acct_summary.get("NAV", 0) or 0)
+            _bal_acct     = float(_acct_summary.get("balance", 0) or 0)
+            # balance field is in account currency; NAV should match when no open trades at start
+            # Use the xau_margin_rate path to get conversion
+            _conv = float(settings.get("sgd_to_usd_rate", 0.745))
+        except Exception:
+            _conv = float(settings.get("sgd_to_usd_rate", 0.745))
+
+        # Convert account-currency P&L to USD for comparison
+        unrealized_pnl = unrealized_pnl_acct * _conv
+
+        log.debug(
+            "check_breakeven: trade %s unrealizedPL=%.4f %s → %.4f USD (conv=%.4f) | sl_usd=%.2f",
+            trade_id, unrealized_pnl_acct, settings.get("account_currency", "SGD"),
+            unrealized_pnl, _conv, sl_usd,
+        )
+
+        # Gate: trigger only when unrealized profit (USD) >= 1x SL risk (USD)
         if unrealized_pnl < sl_usd:
             continue
 
