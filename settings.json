@@ -95,5 +95,7 @@
   "london_report_hour_sgt": 21,
   "london_report_minute_sgt": 5,
   "us_report_hour_sgt": 1,
-  "us_report_minute_sgt": 5
+  "us_report_minute_sgt": 5,
+  "sgd_to_usd_rate": 0.745,
+  "account_currency": "SGD"
 }
