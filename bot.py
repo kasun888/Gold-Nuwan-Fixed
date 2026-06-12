@@ -160,9 +160,9 @@ def validate_settings(settings: dict) -> dict:
     settings.setdefault("account_balance_override",  0)
     settings.setdefault("enabled",                   True)
     settings.setdefault("atr_sl_multiplier",         1.5)           # FIXED: was 1.0 — gold needs wider SL
-    settings.setdefault("sl_min_usd",                17.0)    # 1700 pips    # v2: fixed at 3000 pips          # FIXED: was 15.0 — $25 was too tight
-    settings.setdefault("sl_max_usd",                17.0)    # 1700 pips    # v2: fixed at 3000 pips          # FIXED: was 40.0
-    settings.setdefault("fixed_sl_usd",              17.0)    # 1700 pips    # v2: 3000 pips = $30          # FIXED: was 20.0
+    settings.setdefault("sl_min_usd",                8.0)     # 800 pips    # 1700 pips    # v2: fixed at 3000 pips          # FIXED: was 15.0 — $25 was too tight
+    settings.setdefault("sl_max_usd",                8.0)     # 800 pips    # 1700 pips    # v2: fixed at 3000 pips          # FIXED: was 40.0
+    settings.setdefault("fixed_sl_usd",              8.0)     # 800 pips    # 1700 pips    # v2: 3000 pips = $30          # FIXED: was 20.0
     settings.setdefault("breakeven_trigger_usd",     35.0)          # FIXED: was 15.0 — trigger BE at 1x SL
     settings.setdefault("sl_pct",                   0.0025)
     settings.setdefault("tp_pct",                   0.0075)
