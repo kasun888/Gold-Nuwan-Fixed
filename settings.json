@@ -8,15 +8,15 @@
   "sl_mode": "fixed_usd",
   "tp_mode": "fixed_usd",
   "atr_sl_multiplier": 1.5,
-  "sl_min_usd": 8.0,
-  "sl_max_usd": 8.0,
+  "sl_min_usd": 17.0,
+  "sl_max_usd": 17.0,
   "sl_min_atr_mult": 1.0,
-  "fixed_sl_usd": 8.0,
+  "fixed_sl_usd": 17.0,
   "fixed_tp_usd": 36.5,
   "rr_ratio": 2.15,
   "max_rr_ratio": 2.3,
   "breakeven_enabled": true,
-  "breakeven_trigger_usd": 8.0,
+  "breakeven_trigger_usd": 10.0,
   "margin_safety_factor": 0.75,
   "max_concurrent_trades": 1,
   "pyramid_enabled": false,
@@ -97,5 +97,6 @@
   "us_report_hour_sgt": 1,
   "us_report_minute_sgt": 5,
   "sgd_to_usd_rate": 0.745,
-  "account_currency": "SGD"
+  "account_currency": "SGD",
+  "fixed_units": 3.0
 }
