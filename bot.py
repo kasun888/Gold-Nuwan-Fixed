@@ -143,7 +143,7 @@ def validate_settings(settings: dict) -> dict:
     # v4.4 — Three sessions active
     # FIXED defaults — tuned for 60% win rate target
     settings.setdefault("spread_limits",             {"Asian": 999, "London": 60, "US": 60})    # FIX BUG3: 60 pips=$0.60 max spread
-    settings.setdefault("max_trades_day",            1)             # v2: 1 trade per day max             # FIXED: was 999, now 2 max per day
+    settings.setdefault("max_trades_day",            3)             # 3 trades per day max             # FIXED: was 999, now 2 max per day
     settings.setdefault("max_losing_trades_day",     2)             # FIXED: was 999, now stop after 2 losses
     settings.setdefault("sl_mode",                   "fixed_usd")    # v2: fixed pip SL
     settings.setdefault("tp_mode",                   "fixed_usd")    # v2: fixed pip TP
@@ -202,7 +202,7 @@ def validate_settings(settings: dict) -> dict:
     # v4.2 — same-setup re-entry cooldown (microsecond bug fixed in v4.0)
     settings.setdefault("same_setup_cooldown_min",     30)    # FIXED: was 15 — 30min between same setups
     # v2.0 — Win candle lock
-    settings.setdefault("post_win_day_lock",          True)    # v2: NEW — block all trades for rest of day after a win
+    settings.setdefault("post_win_day_lock",          False)   # disabled — allows up to 3 trades/day; session+candle lock still protect against same-session re-entry
     settings.setdefault("post_win_candle_lock",        True)
     settings.setdefault("post_win_session_lock",       True)
 
@@ -781,36 +781,45 @@ def check_breakeven(history: list, trader, alert, settings: dict):
         if open_trade is None:
             continue
 
+        # ── FIX: compare PRICE MOVEMENT, not units-scaled dollar P&L ─────────
+        # Bug history: unrealizedPL from OANDA already includes units in the
+        # dollar figure (price_move × units). Comparing that directly against
+        # sl_usd (a PRICE DISTANCE, e.g. $8 = 800 pips) caused the trigger to
+        # fire far too early once units grew (2.9 units × 4pts = $11.6 > $8
+        # fired at half the intended move). The trigger must be checked in
+        # PRICE TERMS, independent of position size.
         try:
-            unrealized_pnl_acct = float(open_trade.get("unrealizedPL", 0))
+            current_price = float(
+                open_trade.get("price")
+                or open_trade.get("currentPrice")
+                or 0
+            )
         except (TypeError, ValueError):
-            continue
+            current_price = 0
 
-        # FIX: OANDA returns unrealizedPL in ACCOUNT currency (SGD for this account).
-        # sl_usd is in USD. Must convert account P&L to USD before comparing.
-        # Get the account currency conversion rate (SGD/USD ~ 0.745).
-        # We read it from the account summary; fall back to a safe default.
-        try:
-            _acct_summary = trader.get_account_summary() or {}
-            _nav_usd      = float(_acct_summary.get("NAV", 0) or 0)
-            _bal_acct     = float(_acct_summary.get("balance", 0) or 0)
-            # balance field is in account currency; NAV should match when no open trades at start
-            # Use the xau_margin_rate path to get conversion
-            _conv = float(settings.get("sgd_to_usd_rate", 0.745))
-        except Exception:
-            _conv = float(settings.get("sgd_to_usd_rate", 0.745))
+        if not current_price:
+            # Fallback: derive price movement from unrealizedPL / units if
+            # the live price field isn't available on this trade object.
+            try:
+                unrealized_pnl_raw = float(open_trade.get("unrealizedPL", 0))
+                _u = float(units_open or 1)
+                price_move = abs(unrealized_pnl_raw) / _u if _u else 0
+            except (TypeError, ValueError, ZeroDivisionError):
+                continue
+        else:
+            price_move = (
+                current_price - entry if direction == "BUY" else entry - current_price
+            )
 
-        # Convert account-currency P&L to USD for comparison
-        unrealized_pnl = unrealized_pnl_acct * _conv
+        breakeven_trigger = float(settings.get("breakeven_trigger_usd", sl_usd))
 
         log.debug(
-            "check_breakeven: trade %s unrealizedPL=%.4f %s → %.4f USD (conv=%.4f) | sl_usd=%.2f",
-            trade_id, unrealized_pnl_acct, settings.get("account_currency", "SGD"),
-            unrealized_pnl, _conv, sl_usd,
+            "check_breakeven: trade %s price_move=%.3f pts | trigger=%.2f pts | sl_usd=%.2f",
+            trade_id, price_move, breakeven_trigger, sl_usd,
         )
 
-        # Gate: trigger only when unrealized profit (USD) >= 1x SL risk (USD)
-        if unrealized_pnl < sl_usd:
+        # Gate: trigger only when price has moved >= breakeven_trigger (price distance)
+        if price_move < breakeven_trigger:
             continue
 
         trigger_price = (
@@ -1500,7 +1509,7 @@ def _guard_phase(db, run_id, settings, alert, trader, history, now_sgt, today, d
     # This addresses the pattern where a winning trade is followed by losing
     # trades in the same session — "banking the win" by sitting out the rest
     # of the session.
-    if settings.get("post_win_day_lock", True) and open_count == 0:
+    if settings.get("post_win_day_lock", False) and open_count == 0:
         _locked_sess, _locked_day = get_win_session()
         if _locked_day and _locked_day == today:
             _lock_msg = (
@@ -1536,7 +1545,7 @@ def _guard_phase(db, run_id, settings, alert, trader, history, now_sgt, today, d
                 _locked_day, today,
                 extra={"run_id": run_id},
             )
-    if settings.get("post_win_day_lock", True) and open_count == 0:
+    if settings.get("post_win_day_lock", False) and open_count == 0:
         _locked_sess, _locked_day = get_win_session()
         if _locked_day and _locked_day == today:
             _lock_msg = (
