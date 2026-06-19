@@ -160,10 +160,11 @@ def validate_settings(settings: dict) -> dict:
     settings.setdefault("account_balance_override",  0)
     settings.setdefault("enabled",                   True)
     settings.setdefault("atr_sl_multiplier",         1.5)           # FIXED: was 1.0 — gold needs wider SL
-    settings.setdefault("sl_min_usd",                8.0)     # 800 pips    # 1700 pips    # v2: fixed at 3000 pips          # FIXED: was 15.0 — $25 was too tight
-    settings.setdefault("sl_max_usd",                8.0)     # 800 pips    # 1700 pips    # v2: fixed at 3000 pips          # FIXED: was 40.0
-    settings.setdefault("fixed_sl_usd",              8.0)     # 800 pips    # 1700 pips    # v2: 3000 pips = $30          # FIXED: was 20.0
-    settings.setdefault("breakeven_trigger_usd",     35.0)          # FIXED: was 15.0 — trigger BE at 1x SL
+    settings.setdefault("sl_min_usd",                17.0)    # 1700 pips
+    settings.setdefault("sl_max_usd",                17.0)    # 1700 pips
+    settings.setdefault("fixed_sl_usd",              17.0)    # 1700 pips
+    settings.setdefault("fixed_units",                3.0)     # decoupled position size — independent of SL distance
+    settings.setdefault("breakeven_trigger_usd",     10.0)          # 1000 pips — fires before fixed_units profit target
     settings.setdefault("sl_pct",                   0.0025)
     settings.setdefault("tp_pct",                   0.0075)
     settings.setdefault("margin_safety_factor",      0.6)
@@ -596,12 +597,31 @@ def derive_rr_ratio(levels: dict, sl_usd: float, tp_usd: float, settings: dict) 
 
 # Note: compute_atr_sl_usd alias removed — no external callers exist in this codebase
 
-def calculate_units_from_position(position_usd: int, sl_usd: float) -> float:
-    """Convert score-based position risk to OANDA units.
+def calculate_units_from_position(position_usd: int, sl_usd: float, settings: dict | None = None) -> float:
+    """Return position size in units.
 
-    units = position_usd / sl_usd
-    e.g. $66 risk at $6 SL = 11 units of XAU_USD
+    FIXED (decoupled sizing): units are now a FIXED config value
+    (`fixed_units`), independent of sl_usd. Previously units were derived
+    as position_usd / sl_usd, which meant widening SL (for noise protection)
+    automatically shrank position size and therefore shrank profit per pip.
+    That coupling made it impossible to tune SL and profit-per-trigger
+    independently. Now: set a fixed unit size directly, and SL/TP can be
+    tuned purely for risk/reward without affecting position size.
+
+    Falls back to the old position_usd/sl_usd formula only if fixed_units
+    is not set in settings (backward compatible).
     """
+    if settings is not None:
+        fixed_units = settings.get("fixed_units")
+        if fixed_units is not None:
+            try:
+                fu = float(fixed_units)
+                if fu > 0:
+                    return round(fu, 2)
+            except (TypeError, ValueError):
+                pass
+
+    # Legacy fallback: units = position_usd / sl_usd
     if sl_usd <= 0 or position_usd <= 0:
         return 0.0
     return round(position_usd / sl_usd, 2)
@@ -1903,7 +1923,7 @@ def _signal_phase(db, run_id, settings, alert, trader, history, now_sgt, today, 
     sl_usd   = compute_sl_usd(levels, settings)
     tp_usd   = compute_tp_usd(levels, sl_usd, settings)
     rr_ratio = derive_rr_ratio(levels, sl_usd, tp_usd, settings)
-    units    = calculate_units_from_position(position_usd, sl_usd)
+    units    = calculate_units_from_position(position_usd, sl_usd, settings)
     tp_pct   = (tp_usd / entry * 100) if entry > 0 else None
 
     if units <= 0:
