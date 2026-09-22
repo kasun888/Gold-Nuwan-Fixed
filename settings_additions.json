@@ -1,0 +1,37 @@
+{
+  "_comment_trend_break_engine": "Add/replace these keys to switch bot.py from the CPR engine to the Trend Break Engine.",
+
+  "sl_mode": "signal_native",
+  "tp_mode": "rr_multiple",
+
+  "_comment_rr_ratio_IMPORTANT": "This MUST be <= tbe_tp1_r or every single signal will be skipped by the RR gate in bot.py's _signal_phase (see SETUP_TREND_BREAK_ENGINE.md).",
+  "rr_ratio": 1.0,
+  "max_rr_ratio": 3.0,
+
+  "instrument": "XAU_USD",
+  "instrument_display": "XAU/USD",
+  "timeframe": "M15",
+
+  "position_full_usd": 100,
+  "max_concurrent_trades": 1,
+
+  "tbe_timeframe": "M15",
+  "tbe_ema1": 9,
+  "tbe_ema2": 21,
+  "tbe_ema3": 50,
+  "tbe_ema4": 200,
+  "tbe_swing_len": 10,
+  "tbe_ob_search": 20,
+  "tbe_max_ob": 8,
+  "tbe_require_reaction": true,
+  "tbe_use_wick": true,
+  "tbe_body_ratio": 0.30,
+  "tbe_use_trend": true,
+  "tbe_cooldown": 5,
+  "tbe_atr_len": 14,
+  "tbe_sl_mode": "Structure + ATR buffer",
+  "tbe_sl_mult": 1.5,
+  "tbe_sl_buffer_atr": 0.20,
+  "tbe_max_risk_atr": 3.0,
+  "tbe_tp1_r": 1.0
+}

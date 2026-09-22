@@ -37,7 +37,13 @@ from database import Database
 from logging_utils import configure_logging, get_logger
 from news_filter import NewsFilter
 from oanda_trader import OandaTrader
-from signals import SignalEngine, score_to_position_usd
+from trend_break_signals import TrendBreakEngine as SignalEngine
+# score_to_position_usd is only used for the CPR engine's graded 4/5/6-score
+# sizing tiers. Trend Break Engine reports a fixed score of 6 on every
+# confirmed signal and sizes at position_full_usd directly (see
+# trend_break_signals.py), so this helper is unused but kept importable in
+# case you want to switch back to signals.SignalEngine later.
+from signals import score_to_position_usd
 from startup_checks import run_startup_checks
 from state_utils import (
     RUNTIME_STATE_FILE, SCORE_CACHE_FILE, OPS_STATE_FILE, TRADE_HISTORY_FILE,
@@ -553,13 +559,30 @@ def compute_sl_usd(levels: dict, settings: dict) -> float:
     override; sl_mode in settings.json governs the calculation.
 
     Modes:
-      atr_based  : SL = ATR(14) × atr_sl_multiplier, clamped to [sl_min_usd, sl_max_usd]
-      pct_based  : SL = entry_price × sl_pct
-      fixed_usd  : SL = fixed_sl_usd
+      signal_native : trust the signal engine's own SL distance
+                      (levels["sl_usd_rec"]) as-is. Use this for Trend
+                      Break Engine — its SL is already the structural
+                      order-block edge + ATR buffer, clamped by
+                      max_risk_atr inside the engine itself. Recomputing
+                      a generic ATR stop here would throw that away.
+      atr_based     : SL = ATR(14) × atr_sl_multiplier, clamped to [sl_min_usd, sl_max_usd]
+      pct_based     : SL = entry_price × sl_pct
+      fixed_usd     : SL = fixed_sl_usd
     """
     sl_mode = str(settings.get("sl_mode", "atr_based")).lower()
 
-    if sl_mode == "atr_based":
+    if sl_mode == "signal_native":
+        native = levels.get("sl_usd_rec")
+        if native is not None:
+            try:
+                v = float(native)
+                if v > 0:
+                    return round(v, 2)
+            except (TypeError, ValueError):
+                pass
+        log.warning("signal_native SL: sl_usd_rec missing/invalid — falling back to atr_based")
+
+    if sl_mode == "atr_based" or sl_mode == "signal_native":
         atr = levels.get("atr")
         if atr and atr > 0:
             mult         = float(settings.get("atr_sl_multiplier", 1.0))
