@@ -362,8 +362,6 @@ def send_daily_report() -> None:
             if t.get("status") == "FILLED" and t.get("realized_pnl_usd") is None
         )
 
-        _rep_settings = load_settings()
-        _sess_hour = int(_rep_settings.get('session_start_hour_sgt', 16))
         msg = msg_daily_report(
             day_label   = pd_label,
             day_stats   = pd_stats,
@@ -371,7 +369,6 @@ def send_daily_report() -> None:
             mtd_stats   = mtd_stats,
             open_count  = open_count,
             report_time = now.strftime("%H:%M SGT"),
-            session_start_sgt=f"{_sess_hour:02d}:00 SGT",
         )
         ok = TelegramAlert().send(msg)
         if ok:
